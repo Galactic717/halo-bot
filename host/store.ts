@@ -69,6 +69,8 @@ export class Store {
     this.settings = this.unseal(this.readJson(this.settingsPath, DEFAULT_SETTINGS));
     // merge so new setting keys appear after an upgrade
     this.settings = { ...DEFAULT_SETTINGS, ...this.settings, provider: { ...DEFAULT_SETTINGS.provider, ...this.settings.provider } };
+    // Seal on the first run that has a keychain, so a key written before this existed does not stay in the clear.
+    if (this.secrets && existsSync(this.settingsPath)) this.writeJson(this.settingsPath, this.seal(this.settings));
     for (const r of this.readJson<Routine[]>(this.routinesPath, [])) this.routines.set(r.id, r);
     for (const c of this.readJson<Channel[]>(this.channelsPath, [])) this.channels.set(c.id, c);
     for (const id of this.listAgentIds()) {
