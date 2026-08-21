@@ -196,8 +196,17 @@ export interface Settings {
     category: string;
     command: string;
     args: string[];
+    requires?: { key: string; label: string; hint?: string; placeholder?: string; flag?: string }[];
+    setup?: { key: string; label: string; hint?: string; placeholder?: string; flag?: string }[];
+    /** Secrets, sealed with the OS keychain before they reach disk. */
     env?: Record<string, string>;
+    /** Non-secret answers appended to the command line. */
+    config?: Record<string, string>;
     enabled?: boolean;
+    icon?: string;
+    featured?: boolean;
+    source?: string;
+    remote?: boolean;
   }[];
 }
 

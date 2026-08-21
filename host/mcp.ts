@@ -3,6 +3,16 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolSchema } from './provider.ts';
 
+/** A value the user supplies when installing, either as an env var or as a command argument. */
+export interface McpField {
+  key: string;
+  label: string;
+  hint?: string;
+  placeholder?: string;
+  /** Argument form only: the flag this value follows, e.g. "--token". Bare values are positional. */
+  flag?: string;
+}
+
 export interface McpServerSpec {
   id: string;
   name: string;
@@ -10,11 +20,43 @@ export interface McpServerSpec {
   category: string;
   command: string;
   args: string[];
-  /** Env vars the server needs; the user fills them in when installing. */
-  requires?: { key: string; label: string }[];
+  /** Secrets the server reads from its environment; the user fills them in when installing. */
+  requires?: McpField[];
+  /** Non-secret values appended to the command line — a folder, a database, a URL. */
+  setup?: McpField[];
   /** Filled from the user's answers at install time. */
   env?: Record<string, string>;
+  /** Answers to `setup`, keyed the same way. */
+  config?: Record<string, string>;
   enabled?: boolean;
+  /** simple-icons slug for the brand mark; without one the tile falls back to a monogram. */
+  icon?: string;
+  /** Shown on the marketplace shelf and under the Featured chip. */
+  featured?: boolean;
+  /** npm page or vendor documentation, linked as "View Source". */
+  source?: string;
+  /** Bridged over the network by mcp-remote rather than run locally. */
+  remote?: boolean;
+}
+
+/** Everything a spec needs before it can start. */
+export function missingFields(spec: McpServerSpec): McpField[] {
+  const missing: McpField[] = [];
+  for (const field of spec.requires ?? []) if (!spec.env?.[field.key]?.trim()) missing.push(field);
+  for (const field of spec.setup ?? []) if (!spec.config?.[field.key]?.trim()) missing.push(field);
+  return missing;
+}
+
+/** The full command line, with the user's setup answers appended in declaration order. */
+export function specArgs(spec: McpServerSpec): string[] {
+  const extra: string[] = [];
+  for (const field of spec.setup ?? []) {
+    const value = spec.config?.[field.key]?.trim();
+    if (!value) continue;
+    if (field.flag) extra.push(field.flag);
+    extra.push(value);
+  }
+  return [...spec.args, ...extra];
 }
 
 export interface McpServerStatus {
@@ -251,6 +293,21 @@ export class McpManager {
     return name.startsWith(TOOL_PREFIX);
   }
 
+  /** What one plugin currently exposes, for its detail page. Empty until the server is ready. */
+  tools(id: string): { name: string; description: string }[] {
+    const client = this.clients.get(id);
+    if (!client || client.state !== 'ready') return [];
+    return client.tools.map((tool) => ({ name: tool.name, description: tool.description ?? '' }));
+  }
+
+  /** Starts one plugin on demand and reports where it got to. */
+  async startOne(id: string): Promise<McpServerStatus | undefined> {
+    const spec = this.getSpecs().find((s) => s.id === id);
+    if (!spec) return undefined;
+    await this.client(spec).start().catch(() => {});
+    return this.statuses().find((s) => s.id === id);
+  }
+
   async call(name: string, args: Record<string, unknown>): Promise<string> {
     for (const spec of this.getSpecs()) {
       const prefix = `${TOOL_PREFIX}${spec.id}__`.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -273,8 +330,9 @@ const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx';
  * Running npx's own script through this process's node avoids both problems; the shell is only a fallback.
  */
 function resolveLaunch(spec: McpServerSpec): { file: string; args: string[]; env: Record<string, string>; shell: boolean } {
+  const args = specArgs(spec);
   const isNpx = /^npx(\.cmd)?$/i.test(spec.command);
-  if (!isNpx) return { file: spec.command, args: spec.args, env: {}, shell: false };
+  if (!isNpx) return { file: spec.command, args, env: {}, shell: false };
 
   const fromPath = (process.env.PATH ?? '')
     .split(process.platform === 'win32' ? ';' : ':')
@@ -292,114 +350,9 @@ function resolveLaunch(spec: McpServerSpec): { file: string; args: string[]; env
     ...fromPath,
   ];
   const cli = candidates.find((path) => path && existsSync(path));
-  if (!cli) return { file: spec.command, args: spec.args, env: {}, shell: process.platform === 'win32' };
+  if (!cli) return { file: spec.command, args, env: {}, shell: process.platform === 'win32' };
 
-  return { file: process.execPath, args: [cli, ...spec.args], env: { ELECTRON_RUN_AS_NODE: '1' }, shell: false };
+  return { file: process.execPath, args: [cli, ...args], env: { ELECTRON_RUN_AS_NODE: '1' }, shell: false };
 }
 
-/** Curated marketplace. Everything here is a real, published MCP server. */
-export const MCP_CATALOG: McpServerSpec[] = [
-  {
-    id: 'filesystem',
-    name: 'Filesystem',
-    description: 'Read, write and search files in folders you choose.',
-    category: 'Files',
-    command: NPX,
-    args: ['-y', '@modelcontextprotocol/server-filesystem', process.env.USERPROFILE ?? '.'],
-  },
-  {
-    id: 'fetch',
-    name: 'Fetch',
-    description: 'Fetch a URL and get clean markdown back.',
-    category: 'Web',
-    command: NPX,
-    args: ['-y', 'mcp-server-fetch'],
-  },
-  {
-    id: 'memory',
-    name: 'Knowledge Graph',
-    description: 'A persistent knowledge graph the bots can write facts and relations into.',
-    category: 'Memory',
-    command: NPX,
-    args: ['-y', '@modelcontextprotocol/server-memory'],
-  },
-  {
-    id: 'sequential-thinking',
-    name: 'Sequential Thinking',
-    description: 'Structured step-by-step reasoning for harder problems.',
-    category: 'Reasoning',
-    command: NPX,
-    args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
-  },
-  {
-    id: 'git',
-    name: 'Git',
-    description: 'Read history, diffs and blame from local repositories.',
-    category: 'Code',
-    command: NPX,
-    args: ['-y', '@cyanheads/git-mcp-server'],
-  },
-  {
-    id: 'sqlite',
-    name: 'SQLite',
-    description: 'Query and edit a local SQLite database.',
-    category: 'Data',
-    command: NPX,
-    args: ['-y', 'mcp-server-sqlite-npx'],
-  },
-  {
-    id: 'playwright',
-    name: 'Playwright',
-    description: 'Drive a full browser with accessibility-tree actions.',
-    category: 'Web',
-    command: NPX,
-    args: ['-y', '@playwright/mcp@latest'],
-  },
-  {
-    id: 'github',
-    name: 'GitHub',
-    description: 'Issues, pull requests and code search on GitHub.',
-    category: 'Code',
-    command: NPX,
-    args: ['-y', '@modelcontextprotocol/server-github'],
-    requires: [{ key: 'GITHUB_PERSONAL_ACCESS_TOKEN', label: 'GitHub personal access token' }],
-  },
-  {
-    id: 'brave-search',
-    name: 'Brave Search',
-    description: 'Web and local search through the Brave API.',
-    category: 'Web',
-    command: NPX,
-    args: ['-y', '@modelcontextprotocol/server-brave-search'],
-    requires: [{ key: 'BRAVE_API_KEY', label: 'Brave Search API key' }],
-  },
-  {
-    id: 'slack',
-    name: 'Slack',
-    description: 'Read channels and post messages in a Slack workspace.',
-    category: 'Communication',
-    command: NPX,
-    args: ['-y', '@modelcontextprotocol/server-slack'],
-    requires: [
-      { key: 'SLACK_BOT_TOKEN', label: 'Slack bot token (xoxb-…)' },
-      { key: 'SLACK_TEAM_ID', label: 'Slack team id' },
-    ],
-  },
-  {
-    id: 'notion',
-    name: 'Notion',
-    description: 'Search, read and update Notion pages and databases.',
-    category: 'Docs',
-    command: NPX,
-    args: ['-y', '@notionhq/notion-mcp-server'],
-    requires: [{ key: 'NOTION_API_KEY', label: 'Notion integration token' }],
-  },
-  {
-    id: 'time',
-    name: 'Time',
-    description: 'Current time and timezone conversion the model can trust.',
-    category: 'Utilities',
-    command: NPX,
-    args: ['-y', 'time-mcp'],
-  },
-];
+export { NPX };

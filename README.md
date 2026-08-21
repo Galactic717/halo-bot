@@ -64,7 +64,7 @@ want your bots to look at screenshots.
   loaded into every turn.
 - **Skills** — reusable recipes, either written with `SaveSkill` or learned by watching you (see below).
 - **Routines** — interval, daily, weekdays or weekly triggers, several per routine, with a test run and run history.
-- **Plugins** — any MCP server. Installed tools appear to every bot as `mcp__<server>__<tool>`.
+- **Plugins** — a marketplace of real MCP servers. Installed tools appear to every bot as `mcp__<server>__<tool>`.
 
 ## Teach a task
 
@@ -88,6 +88,22 @@ A bot's Settings pane carries its own rules, so a research bot and a file bot do
 - **Smart review** (Settings → General) additionally asks the model to judge anything the rules would wave through.
 - Rules are plain language: "when a bot wants to *read files from my Downloads folder* → allow automatically".
 - Closing the window keeps the bots running in the tray; quit from the tray to stop everything.
+
+## Plugins
+
+**Plugins** at the bottom of the sidebar opens the marketplace: a shelf per category, a Featured row,
+fuzzy search, and a detail page per plugin showing what it runs and which tools it exposes.
+
+Everything on the shelves is a real, published MCP server — an npm package that exists on the registry,
+or a documented hosted endpoint bridged in by `mcp-remote`, where signing in happens in a browser window
+the bridge opens itself. A plugin that needs a key or a folder asks for it once in **Plugin Setup**;
+keys are encrypted with the OS keychain, paths are not.
+
+**Your own servers** under `N installed` takes any MCP server that speaks stdio — give it a name, a
+command and arguments, and its tools reach every bot like any other plugin.
+
+The catalogue lives in `host/catalog.ts`. Brand marks are baked from simple-icons into
+`src/components/brandIcons.ts` by `npm run icons:brands`; a plugin with no mark gets a monogram.
 
 ## Keyboard
 

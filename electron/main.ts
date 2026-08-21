@@ -8,7 +8,8 @@ import { Runner } from '../host/runner';
 import { Scheduler, nextRun } from '../host/scheduler';
 import { Computer } from './computer';
 import { buildPortableBot, parsePortableBot } from '../host/portable';
-import { McpManager, MCP_CATALOG, type McpServerSpec } from '../host/mcp';
+import { McpManager, type McpServerSpec } from '../host/mcp';
+import { MCP_CATALOG } from '../host/catalog';
 import { listModels, listModelsDetailed, rankModels } from '../host/provider';
 import { parseTrigger } from '../host/tools';
 import type { Agent, ApprovalDecision, Channel, HaloEvent, Routine, Settings } from '../host/types';
@@ -677,7 +678,8 @@ function registerIpc() {
     const plugins = store.getSettings().plugins.filter((p) => p.id !== spec.id);
     const next = store.saveSettings({ plugins: [...plugins, { ...spec, enabled: true }] });
     emit({ type: 'settings', settings: next });
-    await mcp.startAll();
+    // Only the new one starts: an unrelated broken plugin must not make this install look failed.
+    await mcp.startOne(spec.id);
     return mcp.statuses();
   });
 
@@ -686,6 +688,31 @@ function registerIpc() {
     const next = store.saveSettings({ plugins: store.getSettings().plugins.filter((p) => p.id !== id) });
     emit({ type: 'settings', settings: next });
     return mcp.statuses();
+  });
+
+  ipcMain.handle('halo:plugins.tools', (_e, id: string) => mcp.tools(id));
+
+  /** Any MCP server the user runs themselves, added by its command line. */
+  ipcMain.handle('halo:plugins.addCustom', async (_e, input: { name: string; command: string; args: string; description?: string }) => {
+    const name = input.name.trim();
+    const command = input.command.trim();
+    if (!name || !command) return null;
+    const id = `custom-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || randomUUID().slice(0, 8)}`;
+    const spec: McpServerSpec = {
+      id,
+      name,
+      description: input.description?.trim() || 'Added by you.',
+      category: 'MCP',
+      command,
+      // split on whitespace, but keep "quoted paths" in one piece
+      args: (input.args.match(/"[^"]*"|\S+/g) ?? []).map((arg) => arg.replace(/^"|"$/g, '')),
+      enabled: true,
+    };
+    const plugins = store.getSettings().plugins.filter((p) => p.id !== id);
+    const next = store.saveSettings({ plugins: [...plugins, spec] });
+    emit({ type: 'settings', settings: next });
+    await mcp.startOne(id);
+    return spec;
   });
 
   ipcMain.handle('halo:plugins.toggle', async (_e, id: string, enabled: boolean) => {

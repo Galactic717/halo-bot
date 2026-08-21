@@ -13,6 +13,10 @@ import { mentionedNames } from './mentions.ts';
 import { buildPortableBot, parsePortableBot } from './portable.ts';
 import { compactHistory, estimateTokens } from './compaction.ts';
 import { rankModels, type ChatMessage } from './provider.ts';
+import { MCP_CATALOG } from './catalog.ts';
+import { missingFields, specArgs } from './mcp.ts';
+import { PLUGIN_CATEGORIES, SHELF_LIMIT, fuzzyScore, shelves } from './plugins.ts';
+import { BRAND_ICONS } from '../src/components/brandIcons.ts';
 import type { Routine, Settings } from './types.ts';
 
 const settings = (patch: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, ...patch });
@@ -341,4 +345,114 @@ test('sealed secrets never reach the settings file in the clear', () => {
   const reloaded = new Store(root, codec);
   assert.equal(reloaded.getSettings().provider.apiKey, 'sk-super-secret');
   assert.equal(reloaded.getSettings().plugins[0]?.env?.TOKEN, 'ghp_secret');
+});
+
+test('every catalogue entry is launchable and lands on a real shelf', () => {
+  const categories = new Set<string>(PLUGIN_CATEGORIES);
+  const seen = new Set<string>();
+
+  for (const spec of MCP_CATALOG) {
+    assert.ok(!seen.has(spec.id), `duplicate plugin id: ${spec.id}`);
+    seen.add(spec.id);
+    assert.match(spec.id, /^[a-z0-9-]+$/, `${spec.id} is not a usable id`);
+    assert.ok(spec.name.trim().length > 0, `${spec.id} has no name`);
+    assert.ok(spec.description.trim().length > 0, `${spec.id} has no description`);
+    assert.ok(categories.has(spec.category), `${spec.id} sits on an unknown shelf: ${spec.category}`);
+    assert.ok(spec.command.trim().length > 0, `${spec.id} has no command`);
+    assert.ok(spec.args.length > 0, `${spec.id} has no arguments`);
+    assert.ok(spec.source?.startsWith('https://'), `${spec.id} has no source link`);
+    // a field is either a secret (env) or a command-line value (setup) — never silently both
+    for (const field of [...(spec.requires ?? []), ...(spec.setup ?? [])]) {
+      assert.ok(field.key.trim() && field.label.trim(), `${spec.id} has an unlabelled field`);
+    }
+    if (spec.icon) assert.ok(BRAND_ICONS[spec.icon], `${spec.id} names a brand mark that was not baked in: ${spec.icon}`);
+  }
+
+  assert.ok(MCP_CATALOG.some((spec) => spec.featured), 'the Featured shelf would be empty');
+  // every shelf the chips offer has something on it, or the chip leads nowhere
+  for (const category of PLUGIN_CATEGORIES) {
+    assert.ok(MCP_CATALOG.some((spec) => spec.category === category), `nothing on the ${category} shelf`);
+  }
+});
+
+test('a setup answer becomes an argument, and a missing one is reported', () => {
+  const spec = {
+    id: 'x',
+    name: 'X',
+    description: '',
+    category: 'MCP',
+    command: 'npx',
+    args: ['-y', 'thing'],
+    requires: [{ key: 'TOKEN', label: 'Token' }],
+    setup: [
+      { key: 'root', label: 'Folder' },
+      { key: 'token', label: 'Token', flag: '--token' },
+    ],
+  };
+
+  assert.deepEqual(missingFields(spec).map((f) => f.key), ['TOKEN', 'root', 'token']);
+  assert.deepEqual(specArgs(spec), ['-y', 'thing']);
+
+  const filled = { ...spec, env: { TOKEN: 'secret' }, config: { root: 'D:/data', token: 'abc' } };
+  assert.deepEqual(missingFields(filled), []);
+  assert.deepEqual(specArgs(filled), ['-y', 'thing', 'D:/data', '--token', 'abc']);
+
+  // blank answers are not passed through as empty arguments
+  assert.deepEqual(specArgs({ ...spec, config: { root: '   ', token: '' } }), ['-y', 'thing']);
+});
+
+test('search ranks an exact name over a prefix, a substring and a loose match', () => {
+  const exact = fuzzyScore('notion', 'Notion');
+  const prefix = fuzzyScore('cal', 'Calendar');
+  const inName = fuzzyScore('cal', 'Google Calendar');
+  const inDescription = fuzzyScore('cal', 'Notion', 'calendar sync');
+  const loose = fuzzyScore('gcal', 'Google Calendar');
+
+  assert.ok(exact > prefix, 'an exact name should win');
+  assert.ok(prefix > inName, 'a prefix should beat a substring further along');
+  assert.ok(inName > inDescription, 'the name should beat the description');
+  assert.ok(inDescription > loose, 'a real word should beat characters threaded through');
+  assert.ok(loose > 0, 'characters in order should still match');
+
+  assert.equal(fuzzyScore('zzz', 'Notion', 'a page tool'), 0, 'nothing in common should not match');
+  assert.equal(fuzzyScore('', 'Anything'), 1, 'an empty query keeps everything');
+});
+
+test('the All view lays out shelves in order and defers the rest to View all', () => {
+  const groups = shelves(MCP_CATALOG, 'All', '');
+  assert.equal(groups[0]?.title, 'Featured');
+
+  const order = groups.slice(1).map((g) => g.title);
+  const expected = PLUGIN_CATEGORIES.filter((c) => MCP_CATALOG.some((s) => s.category === c));
+  assert.deepEqual(order, [...expected]);
+
+  for (const group of groups) {
+    assert.ok(group.plugins.length <= SHELF_LIMIT, `${group.title} shows more than a shelf holds`);
+    const total = group.title === 'Featured'
+      ? MCP_CATALOG.filter((s) => s.featured).length
+      : MCP_CATALOG.filter((s) => s.category === group.title).length;
+    assert.equal(group.plugins.length + group.hidden, total, `${group.title} loses plugins between the shelf and View all`);
+    if (group.hidden > 0) assert.ok(group.filter, `${group.title} hides plugins with no way to see them`);
+  }
+});
+
+test('a chosen category shows everything on that shelf, and a query flattens into Results', () => {
+  const research = shelves(MCP_CATALOG, 'Research', '');
+  assert.equal(research.length, 1);
+  assert.equal(research[0]?.title, 'Research');
+  assert.equal(research[0]?.hidden, 0);
+  assert.equal(research[0]?.plugins.length, MCP_CATALOG.filter((s) => s.category === 'Research').length);
+  assert.ok(research[0]!.plugins.every((s) => s.category === 'Research'));
+
+  const found = shelves(MCP_CATALOG, 'All', 'notion');
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.title, 'Results');
+  assert.equal(found[0]?.plugins[0]?.id, 'notion');
+
+  // the active chip scopes the search, exactly like the original
+  const scoped = shelves(MCP_CATALOG, 'Research', 'notion');
+  assert.ok(!scoped[0]!.plugins.some((s) => s.id === 'notion'));
+  assert.ok(scoped[0]!.plugins.every((s) => s.category === 'Research'));
+
+  assert.deepEqual(shelves(MCP_CATALOG, 'All', 'qqqzzz')[0]?.plugins, []);
 });

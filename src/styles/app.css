@@ -1000,13 +1000,6 @@ button {
 /* plugins */
 .modal--plugins { width: min(920px, 92vw); height: min(680px, 86vh); grid-template-columns: 1fr; }
 
-.plugins__bar {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
 .tabs { display: flex; gap: var(--space-1); background: var(--fill-secondary); padding: 2px; border-radius: var(--radius-lg); }
 .tabs button {
   padding: 4px var(--space-3);
@@ -1016,44 +1009,133 @@ button {
 }
 .tabs button[data-active="true"] { background: var(--bg-elevated); color: var(--text-primary); }
 
-.plugins__group { margin-bottom: var(--space-5); }
+.plugins { display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: var(--space-6) var(--space-6) 0; }
 
-.plugins__grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: var(--space-2);
-}
+.plugins__head { display: flex; align-items: center; gap: var(--space-3); }
+.plugins__head h2 { margin: 0; flex: 1; font-size: var(--text-xl); }
+.plugins__head--detail { justify-content: space-between; padding-bottom: var(--space-4); }
+.plugins__title { flex: 1; text-align: center; font-weight: var(--weight-semibold); }
 
-.plugin-card {
+/* the breadcrumb into "your plugins" and back out of it */
+.plugins__crumb {
+  align-self: flex-start;
   display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xl);
-  background: var(--bg-subtle);
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 var(--space-4);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
 }
+.plugins__crumb:hover { color: var(--text-secondary); }
 
-.plugin-card:hover { border-color: var(--border-default); }
-
-.plugin-card__icon {
-  width: 32px;
-  height: 32px;
+.plugins__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-3);
   border-radius: var(--radius-lg);
   background: var(--fill-secondary);
-  display: grid;
-  place-items: center;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   flex: none;
 }
+.plugins__search input { flex: 1; background: none; border: none; outline: none; color: var(--text-primary); font-size: var(--text-base); }
+.plugins__search input::placeholder { color: var(--text-tertiary); }
+.plugins__search:focus-within { box-shadow: 0 0 0 1px var(--accent) inset; }
 
-.plugin-card__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.plugin-card__title { font-weight: var(--weight-semibold); }
-.plugin-card__desc { color: var(--text-secondary); font-size: var(--text-sm); }
-.plugin-card__status { font-size: var(--text-xs); color: var(--text-tertiary); }
-.plugin-card__status[data-state="ready"] { color: var(--text-success); }
-.plugin-card__status[data-state="error"] { color: var(--text-danger); }
-.plugin-card__status[data-state="starting"] { color: var(--text-warning); }
+.plugins__chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-4) 0 var(--space-2); flex: none; min-width: 0; }
+.plugins__chips button {
+  padding: 5px var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--fill-secondary);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.plugins__chips button:hover { background: var(--fill-secondary-hover); color: var(--text-primary); }
+.plugins__chips button[data-active="true"] { background: var(--fill-ghost-selected); color: var(--text-primary); }
+
+/* the shelves scroll; the search box and the chips above them do not */
+.plugins__scroll { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--space-3) 0 var(--space-6); }
+
+.shelf { margin-bottom: var(--space-5); }
+.shelf__head { display: flex; align-items: center; justify-content: space-between; }
+.shelf__all { color: var(--text-tertiary); font-size: var(--text-sm); }
+.shelf__all:hover { color: var(--text-primary); }
+
+/* minmax(0,…) so a long description shrinks instead of pushing the column past the modal */
+.shelf__grid { display: grid; gap: 2px; grid-template-columns: minmax(0, 1fr); }
+.shelf__grid[data-columns="2"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: var(--space-4); }
+
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) var(--space-2);
+  margin: 0 calc(var(--space-2) * -1);
+  border-radius: var(--radius-xl);
+  cursor: pointer;
+}
+.plugin-row:hover { background: var(--fill-ghost-hover); }
+
+.plugin-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: var(--fill-secondary);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+  overflow: hidden;
+}
+
+.plugin-row__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.plugin-row__name { font-weight: var(--weight-semibold); }
+.plugin-row__desc {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-row__status { font-size: var(--text-xs); color: var(--text-tertiary); white-space: nowrap; }
+.plugin-row__status[data-state="ready"] { color: var(--text-success); }
+.plugin-row__status[data-state="error"] { color: var(--text-danger); }
+.plugin-row__status[data-state="starting"] { color: var(--text-warning); }
+.plugin-row__action { flex: none; border-radius: var(--radius-full); padding: 4px var(--space-4); }
+
+/* the shelves keep their own gutter, so a hover plate never touches the modal edge */
+.shelf { padding: 0 var(--space-1); }
+
+/* empty notes are centred everywhere else; on a shelf they read as part of the section above */
+.plugins__scroll .empty-note { text-align: left; padding: var(--space-2) 0 0; margin: 0; }
+
+.plugin-detail__top { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+.plugin-detail__ident { flex: 1; min-width: 0; }
+.plugin-detail__name { font-size: var(--text-lg); font-weight: var(--weight-semibold); }
+.plugin-detail__source { display: flex; align-items: center; gap: 4px; color: var(--text-tertiary); font-size: var(--text-sm); }
+.plugin-detail__source:hover { color: var(--text-primary); }
+.plugin-detail__desc { color: var(--text-secondary); margin: 0 0 var(--space-5); }
+.plugin-detail__command { font-family: var(--font-mono); font-size: var(--text-xs); word-break: break-all; }
+.plugin-detail__tool { font-family: var(--font-mono); font-size: var(--text-sm); word-break: break-all; }
+.plugin-detail__toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: var(--space-2) 0; }
+
+.plugin-detail__error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  margin-bottom: var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--fill-danger-subtle);
+  color: var(--text-danger);
+  font-size: var(--text-sm);
+  word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .shelf__grid[data-columns="2"] { grid-template-columns: 1fr; }
+}
 
 .composer[data-dragging="true"] .composer__inner {
   border-color: var(--accent);

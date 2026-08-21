@@ -119,3 +119,11 @@ export const RecordIcon = ({ size = 16 }: IconProps) => (
 export const SparkIcon = ({ size = 16 }: IconProps) => (
   <svg {...base(size)}><path d="M8 2.4 9.3 6l3.6 1.3-3.6 1.3L8 12.2 6.7 8.6 3.1 7.3 6.7 6zM12.4 11.2l.5 1.4 1.4.5-1.4.5-.5 1.4-.5-1.4-1.4-.5 1.4-.5z" /></svg>
 );
+
+export const ChevronRightIcon = ({ size = 16 }: IconProps) => (
+  <svg {...base(size)}><path d="M6 3.5 10.5 8 6 12.5" /></svg>
+);
+
+export const ExternalLinkIcon = ({ size = 12 }: IconProps) => (
+  <svg {...base(size)}><path d="M9.5 3.5H12.5V6.5M12.5 3.5 7.5 8.5M11 9.5v3h-8v-8h3" /></svg>
+);

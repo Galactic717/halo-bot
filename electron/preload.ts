@@ -93,6 +93,9 @@ const api = {
   quit: (): Promise<void> => ipcRenderer.invoke('halo:quit'),
 
   pluginCatalog: (): Promise<McpServerSpec[]> => ipcRenderer.invoke('halo:plugins.catalog'),
+  pluginTools: (id: string): Promise<{ name: string; description: string }[]> => ipcRenderer.invoke('halo:plugins.tools', id),
+  addCustomPlugin: (input: { name: string; command: string; args: string; description: string }): Promise<McpServerSpec | null> =>
+    ipcRenderer.invoke('halo:plugins.addCustom', input),
   pluginsInstalled: (): Promise<McpServerSpec[]> => ipcRenderer.invoke('halo:plugins.installed'),
   pluginStatus: (): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.status'),
   installPlugin: (spec: McpServerSpec): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.install', spec),
