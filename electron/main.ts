@@ -660,7 +660,14 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
 
-  ipcMain.handle('halo:openPath', (_e, path: string) => shell.openPath(path));
+  /** A file goes to the shell, a url goes to the browser — openPath cannot do the second. */
+  ipcMain.handle('halo:openPath', async (_e, target: string) => {
+    if (/^https?:\/\//i.test(target)) {
+      await shell.openExternal(target);
+      return '';
+    }
+    return shell.openPath(target);
+  });
   ipcMain.handle('halo:openDataDir', () => shell.openPath(app.getPath('userData')));
   ipcMain.handle('halo:quit', () => {
     quitting = true;
