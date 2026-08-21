@@ -1,0 +1,1002 @@
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, normalize, relative, resolve, basename } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { Store } from './store.ts';
+import type { Agent, ApprovalDecision, ApprovalRequest, HaloEvent, Message, Routine, RoutineTrigger, SystemEvent } from './types.ts';
+import type { ToolSchema } from './provider.ts';
+import type { MemoryStore, MemoryTier } from './memory.ts';
+import type { SkillStore } from './skills.ts';
+import type { Widget } from './types.ts';
+
+export interface ComputerPort {
+  ensure(agentId: string): Promise<void>;
+  /** Shows the screen to the user so they can sign in or take over. */
+  handOver(agentId: string, instruction: string): Promise<void>;
+  navigate(agentId: string, url: string): Promise<{ url: string; title: string }>;
+  act(agentId: string, action: string, params: Record<string, unknown>): Promise<string>;
+  readPage(agentId: string): Promise<string>;
+  screenshot(agentId: string): Promise<string>;
+}
+
+export interface RunnerPort {
+  createAgent(input: { name: string; title?: string; description?: string; color?: string; face?: number }): Agent;
+  updateAgent(id: string, patch: Partial<Agent>): Agent | undefined;
+  deliverToAgent(fromAgentId: string, toAgentId: string, text: string): void;
+  postToRoom(channelId: string, fromAgentId: string, text: string): void;
+  dispatchSubagent(parentAgentId: string, kind: 'browser' | 'research' | 'shell', description: string, prompt: string): string;
+  checkSubagent(id: string): string;
+  stopSubagent(id: string): string;
+}
+
+export interface ToolContext {
+  agentId: string;
+  store: Store;
+  emit: (event: HaloEvent) => void;
+  sendMessage: (text: string, images?: { path: string; alt?: string }[]) => Message;
+  requestApproval: (req: Omit<ApprovalRequest, 'id' | 'createdAt' | 'agentName' | 'question'>) => Promise<ApprovalDecision>;
+  systemEvent: (event: SystemEvent) => void;
+  computer: ComputerPort;
+  runner: RunnerPort;
+  signal: AbortSignal;
+  memory: MemoryStore;
+  skills: SkillStore;
+  sendWidget: (widget: Widget) => Message;
+  startBackground: (command: string, cwd: string, external: boolean) => string;
+  awaitBackground: (id: string, timeoutMs: number) => Promise<string>;
+}
+
+export interface ToolResult {
+  output: string;
+  isError?: boolean;
+  /** A picture the model should actually look at, not just be told about. */
+  imagePath?: string;
+}
+
+export interface Tool {
+  schema: ToolSchema;
+  /** Surface used by the approval gate; undefined means never gated. */
+  surface?: ApprovalRequest['surface'];
+  run: (ctx: ToolContext, args: Record<string, unknown>) => Promise<ToolResult>;
+}
+
+const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
+const num = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+
+const MAX_OUTPUT = 24_000;
+function clip(text: string): string {
+  if (text.length <= MAX_OUTPUT) return text;
+  return `${text.slice(0, MAX_OUTPUT)}\n... [${text.length - MAX_OUTPUT} more characters truncated]`;
+}
+
+function isInside(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/** Nearest ancestor that exists, so a path being created can still be resolved for real. */
+function nearestExisting(p: string): string {
+  let cur = p;
+  for (let i = 0; i < 64 && !existsSync(cur); i++) {
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return cur;
+}
+
+/** Confines a path to the agent's box; throws when the model tries to escape it. */
+function boxPath(ctx: ToolContext, p: string): string {
+  const box = ctx.store.boxDir(ctx.agentId);
+  mkdirSync(box, { recursive: true });
+  const full = isAbsolute(p) ? normalize(p) : resolve(box, p);
+  const outside = () =>
+    new Error(`Path is outside your box: ${p}. Use ExternalRead/ExternalShell for the user's machine, or CopyToBox first.`);
+  if (!isInside(box, full)) throw outside();
+  // A junction or symlink planted inside the box would otherwise be a way straight out of it.
+  try {
+    if (!isInside(realpathSync(box), realpathSync(nearestExisting(full)))) throw outside();
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Path is outside your box')) throw error;
+    // realpath can fail on a path we are about to create; the textual check above already passed
+  }
+  return full;
+}
+
+export function runShell(command: string, cwd: string, signal: AbortSignal, timeoutMs = 120_000): Promise<{ code: number; out: string }> {
+  return new Promise((resolveP) => {
+    mkdirSync(cwd, { recursive: true });
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      { cwd, windowsHide: true },
+    );
+    let out = '';
+    const push = (b: Buffer) => {
+      out += b.toString('utf8');
+      if (out.length > MAX_OUTPUT * 2) out = out.slice(-MAX_OUTPUT * 2);
+    };
+    child.stdout.on('data', push);
+    child.stderr.on('data', push);
+    const timer = setTimeout(() => {
+      out += `\n[timed out after ${timeoutMs}ms]`;
+      child.kill();
+    }, timeoutMs);
+    const onAbort = () => child.kill();
+    signal.addEventListener('abort', onAbort, { once: true });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolveP({ code: code ?? -1, out });
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolveP({ code: -1, out: `${out}\n${String(err)}` });
+    });
+  });
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
+
+/** Text, an image the model can look at, or bytes that would only pollute the context. */
+function fileKind(path: string): 'text' | 'image' | 'binary' {
+  const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
+  try {
+    const head = readFileSync(path).subarray(0, 4096);
+    for (const byte of head) if (byte === 0) return 'binary';
+  } catch {
+    return 'binary';
+  }
+  return 'text';
+}
+
+export const TOOLS: Tool[] = [
+  {
+    schema: {
+      name: 'SendMessage',
+      description:
+        'Say something to the user in the chat. This is the ONLY way the user hears from you - plain assistant text is never delivered. Use it to report progress, ask a question, or hand over finished work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Markdown message shown in the chat.' },
+          images: {
+            type: 'array',
+            description: 'Absolute paths of images to show inside this message. Only paths a tool actually returned.',
+            items: { type: 'string' },
+          },
+        },
+        required: ['text'],
+      },
+    },
+    async run(ctx, args) {
+      const text = str(args.text).trim();
+      const images = (Array.isArray(args.images) ? args.images : [])
+        .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+        .map((path) => ({ path: normalize(path) }))
+        .filter((image) => existsSync(image.path));
+      if (!text && images.length === 0) return { output: 'Nothing sent: text was empty.', isError: true };
+      ctx.sendMessage(text, images);
+      return { output: images.length ? `Delivered with ${images.length} image(s).` : 'Delivered to the user.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ReactToMessage',
+      description: 'Put an emoji reaction on a message in this chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string', description: 'Id of the message to react to; omit for the latest user message.' },
+          emoji: { type: 'string', description: 'A single emoji.' },
+        },
+        required: ['emoji'],
+      },
+    },
+    async run(ctx, args) {
+      const transcript = ctx.store.transcript(ctx.agentId);
+      const target = str(args.message_id)
+        ? transcript.find((m) => m.id === str(args.message_id))
+        : [...transcript].reverse().find((m) => m.role === 'user');
+      if (!target) return { output: 'No such message.', isError: true };
+      const reactions = [...(target.reactions ?? []), str(args.emoji)];
+      ctx.store.updateMessage(ctx.agentId, target.id, { reactions });
+      ctx.emit({ type: 'message.patch', agentId: ctx.agentId, messageId: target.id, reactions });
+      return { output: 'Reaction added.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Shell',
+      description: 'Run a PowerShell command on your own computer (your box). Use it for anything scriptable: files, git, python, curl.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          cwd: { type: 'string', description: "Directory inside your box. Defaults to the box root." },
+          timeout_ms: { type: 'number' },
+          background: {
+            type: 'boolean',
+            description:
+              'Set true for anything slow or never-ending (installs, builds, dev servers, watchers). Returns a shell id immediately; you are told when it finishes.',
+          },
+        },
+        required: ['command'],
+      },
+    },
+    surface: 'shell',
+    async run(ctx, args) {
+      const cwd = str(args.cwd) ? boxPath(ctx, str(args.cwd)) : ctx.store.boxDir(ctx.agentId);
+      if (args.background === true) {
+        const id = ctx.startBackground(str(args.command), cwd, false);
+        return { output: `Started in the background as ${id}. Keep working; you will be told when it finishes.` };
+      }
+      const { code, out } = await runShell(str(args.command), cwd, ctx.signal, num(args.timeout_ms, 120_000));
+      return { output: clip(`exit ${code}\n${out || '(no output)'}`), isError: code !== 0 };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Read',
+      description: 'Read a text file from your box.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' } },
+        required: ['path'],
+      },
+    },
+    async run(ctx, args) {
+      const p = boxPath(ctx, str(args.path));
+      if (!existsSync(p)) return { output: `No such file: ${str(args.path)}`, isError: true };
+
+      // An image is something to look at, not to read; other binaries would only pollute the context.
+      const kind = fileKind(p);
+      if (kind === 'image') return { output: `${basename(p)} is an image. Look at it below.`, imagePath: p };
+      if (kind === 'binary') {
+        return { output: `${basename(p)} is a binary file (${statSync(p).size} bytes). Use Shell to inspect it.`, isError: true };
+      }
+
+      const lines = readFileSync(p, 'utf8').split('\n');
+      const offset = Math.max(0, num(args.offset, 0));
+      const limit = num(args.limit, 800);
+      const slice = lines.slice(offset, offset + limit).map((l, i) => `${offset + i + 1}\t${l}`);
+      return { output: clip(slice.join('\n')) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Write',
+      description: 'Create or overwrite a file in your box.',
+      parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
+    },
+    async run(ctx, args) {
+      const p = boxPath(ctx, str(args.path));
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, str(args.content), 'utf8');
+      return { output: `Wrote ${str(args.content).length} characters to ${relative(ctx.store.boxDir(ctx.agentId), p) || basename(p)}` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Edit',
+      description: 'Replace an exact string inside a file in your box.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+    async run(ctx, args) {
+      const p = boxPath(ctx, str(args.path));
+      if (!existsSync(p)) return { output: `No such file: ${str(args.path)}`, isError: true };
+      const cur = readFileSync(p, 'utf8');
+      const old = str(args.old_string);
+      if (!cur.includes(old)) return { output: 'old_string not found in the file.', isError: true };
+      writeFileSync(p, cur.replace(old, str(args.new_string)), 'utf8');
+      return { output: 'Edited.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ListFiles',
+      description: 'List files and folders in your box.',
+      parameters: { type: 'object', properties: { path: { type: 'string' } } },
+    },
+    async run(ctx, args) {
+      const p = str(args.path) ? boxPath(ctx, str(args.path)) : ctx.store.boxDir(ctx.agentId);
+      if (!existsSync(p)) return { output: 'No such directory.', isError: true };
+      const entries = readdirSync(p, { withFileTypes: true }).map((d) => {
+        const full = join(p, d.name);
+        const size = d.isFile() ? statSync(full).size : 0;
+        return d.isDirectory() ? `${d.name}/` : `${d.name} (${size} B)`;
+      });
+      return { output: entries.join('\n') || '(empty)' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ExternalShell',
+      description:
+        "Run a PowerShell command on the USER'S computer, outside your box. Needs the user's approval. Use it only when the work has to happen on their machine.",
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          cwd: { type: 'string' },
+          reason: { type: 'string', description: 'Why this has to run on their machine.' },
+          timeout_ms: { type: 'number' },
+        },
+        required: ['command'],
+      },
+    },
+    surface: 'external_shell',
+    async run(ctx, args) {
+      const cwd = str(args.cwd) || process.env.USERPROFILE || 'C:/';
+      const { code, out } = await runShell(str(args.command), cwd, ctx.signal, num(args.timeout_ms, 120_000));
+      return { output: clip(`exit ${code}\n${out || '(no output)'}`), isError: code !== 0 };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ExternalRead',
+      description: "Read a file from the USER'S computer (any absolute path). Needs approval.",
+      parameters: { type: 'object', properties: { path: { type: 'string' }, limit: { type: 'number' } }, required: ['path'] },
+    },
+    surface: 'external_read',
+    async run(_ctx, args) {
+      const p = normalize(str(args.path));
+      if (!existsSync(p)) return { output: `No such file: ${p}`, isError: true };
+      const kind = fileKind(p);
+      if (kind === 'image') return { output: `${basename(p)} is an image; look at it below.`, imagePath: p };
+      if (kind === 'binary') return { output: `${basename(p)} is a binary file. Use ExternalShell if you need to inspect it.`, isError: true };
+      const lines = readFileSync(p, 'utf8').split(/\r?\n/).slice(0, num(args.limit, 800));
+      return { output: clip(lines.join('\n')) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'CopyToBox',
+      description: "Copy a file from the user's computer into your box so you can work on it.",
+      parameters: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source'] },
+    },
+    surface: 'external_read',
+    async run(ctx, args) {
+      const src = normalize(str(args.source));
+      if (!existsSync(src)) return { output: `No such file: ${src}`, isError: true };
+      const dst = boxPath(ctx, str(args.destination) || basename(src));
+      mkdirSync(dirname(dst), { recursive: true });
+      copyFileSync(src, dst);
+      return { output: `Copied to ${relative(ctx.store.boxDir(ctx.agentId), dst)}` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'CopyFromBox',
+      description: "Copy a file out of your box onto the user's computer. Needs approval.",
+      parameters: { type: 'object', properties: { box_path: { type: 'string' }, destination: { type: 'string' } }, required: ['box_path', 'destination'] },
+    },
+    surface: 'file_write',
+    async run(ctx, args) {
+      const src = boxPath(ctx, str(args.box_path));
+      if (!existsSync(src)) return { output: 'No such file in your box.', isError: true };
+      const dst = normalize(str(args.destination));
+      mkdirSync(dirname(dst), { recursive: true });
+      copyFileSync(src, dst);
+      return { output: `Copied to ${dst}` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'WebSearch',
+      description: 'Search the web and get back result titles, urls and snippets.',
+      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    },
+    async run(ctx, args) {
+      const settings = ctx.store.getSettings();
+      if (!settings.webSearch.enabled) return { output: 'Web search is disabled in settings.', isError: true };
+      const url = `${settings.webSearch.endpoint}${encodeURIComponent(str(args.query))}`;
+      const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 HaloBot' }, signal: ctx.signal });
+      if (!res.ok) return { output: `Search failed: ${res.status}`, isError: true };
+      const html = await res.text();
+      const out: string[] = [];
+      const seen = new Set<string>();
+      // Two shapes of the same page: the classed result link, and the bare redirect link it degrades to.
+      const patterns = [
+        /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g,
+        /<a[^>]+href="(\/\/duckduckgo\.com\/l\/\?uddg=[^"]+)"[^>]*>([\s\S]*?)<\/a>/g,
+      ];
+      for (const re of patterns) {
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) && out.length < 10) {
+          const raw = (m[1] ?? '').replace(/^.*uddg=/, '').split('&')[0] ?? '';
+          let url = raw;
+          try { url = decodeURIComponent(raw); } catch { /* leave it as sent */ }
+          const title = htmlToText(m[2] ?? '');
+          if (!url || !title || seen.has(url)) continue;
+          seen.add(url);
+          out.push(`${out.length + 1}. ${title}\n   ${url}`);
+        }
+        if (out.length > 0) break;
+      }
+      if (out.length > 0) return { output: out.join('\n') };
+      // No links at all usually means a bot check, not an empty result set. Say which it is.
+      const text = htmlToText(html);
+      if (/unusual traffic|are you a robot|captcha|challenge/i.test(text)) {
+        return {
+          output: 'The search engine served a bot check instead of results. Use WebFetch on a specific url, or the Browser tool.',
+          isError: true,
+        };
+      }
+      return { output: clip(text.slice(0, 3000)) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'WebFetch',
+      description: 'Fetch a url and return its readable text.',
+      parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+    },
+    async run(ctx, args) {
+      const res = await fetch(str(args.url), { headers: { 'user-agent': 'Mozilla/5.0 HaloBot' }, signal: ctx.signal });
+      if (!res.ok) return { output: `Fetch failed: ${res.status} ${res.statusText}`, isError: true };
+      const type = res.headers.get('content-type') ?? '';
+      const body = await res.text();
+      return { output: clip(type.includes('html') ? htmlToText(body) : body) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Browser',
+      description:
+        'Drive the browser on your computer - this is how you use websites and apps the user is already signed into. Actions: navigate, read, click, type, press, scroll, back, screenshot.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['navigate', 'read', 'click', 'type', 'press', 'scroll', 'back', 'screenshot'] },
+          url: { type: 'string' },
+          selector: { type: 'string', description: 'CSS selector, or visible text for click.' },
+          text: { type: 'string' },
+          key: { type: 'string' },
+          amount: { type: 'number' },
+        },
+        required: ['action'],
+      },
+    },
+    surface: 'browser',
+    async run(ctx, args) {
+      const action = str(args.action, 'read');
+      await ctx.computer.ensure(ctx.agentId);
+      if (action === 'navigate') {
+        const r = await ctx.computer.navigate(ctx.agentId, str(args.url));
+        return { output: `Now on ${r.title} - ${r.url}` };
+      }
+      if (action === 'read') return { output: clip(await ctx.computer.readPage(ctx.agentId)) };
+      if (action === 'screenshot') {
+        const path = await ctx.computer.screenshot(ctx.agentId);
+        return { output: `Screenshot saved to ${path}`, imagePath: path };
+      }
+      return { output: clip(await ctx.computer.act(ctx.agentId, action, args)) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Screenshot',
+      description: "Take a screenshot of your computer's screen and save it into your box.",
+      parameters: { type: 'object', properties: {} },
+    },
+    async run(ctx) {
+      await ctx.computer.ensure(ctx.agentId);
+      const path = await ctx.computer.screenshot(ctx.agentId);
+      return { output: `Screenshot saved to ${path}`, imagePath: path };
+    },
+  },
+
+  {
+    schema: {
+      name: 'GenerateImage',
+      description:
+        'Make a picture from a description — an icon, a mockup, an illustration. Never use it to depict a real person or to fake a real photo; to show something real, find and fetch the actual image instead.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string' },
+          size: { type: 'string', description: 'e.g. 1024x1024' },
+        },
+        required: ['prompt'],
+      },
+    },
+    async run(ctx, args) {
+      const provider = ctx.store.getSettings().provider;
+      const base = (provider.imageBaseUrl || '').replace(/\/+$/, '');
+      if (!base) {
+        return {
+          output: 'No image endpoint is configured. Tell the user to set one in Settings → Model if they want generated images.',
+          isError: true,
+        };
+      }
+      const res = await fetch(`${base}/images/generations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) },
+        body: JSON.stringify({
+          model: provider.imageModel || 'gpt-image-1',
+          prompt: str(args.prompt),
+          size: str(args.size, '1024x1024'),
+          n: 1,
+          response_format: 'b64_json',
+        }),
+        signal: ctx.signal,
+      });
+      if (!res.ok) return { output: `Image generation failed: ${res.status} ${await res.text().catch(() => '')}`.slice(0, 300), isError: true };
+      const json = (await res.json()) as { data?: { b64_json?: string; url?: string }[] };
+      const first = json.data?.[0];
+      const dir = join(ctx.store.boxDir(ctx.agentId), 'images');
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, `image-${Date.now()}.png`);
+      if (first?.b64_json) {
+        writeFileSync(file, Buffer.from(first.b64_json, 'base64'));
+      } else if (first?.url) {
+        const bytes = await fetch(first.url, { signal: ctx.signal }).then((r) => r.arrayBuffer());
+        writeFileSync(file, Buffer.from(bytes));
+      } else {
+        return { output: 'The image endpoint returned nothing usable.', isError: true };
+      }
+      return { output: `Image saved to ${file}. Attach it with SendMessage images: ["${file}"]`, imagePath: file };
+    },
+  },
+
+  {
+    schema: {
+      name: 'CreateAgent',
+      description: 'Create another bot (a teammate) with its own chat, box and memory.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          title: { type: 'string' },
+          description: { type: 'string', description: 'What this teammate is for.' },
+          color: { type: 'string' },
+        },
+        required: ['name'],
+      },
+    },
+    surface: 'agent_write',
+    async run(ctx, args) {
+      const agent = ctx.runner.createAgent({
+        name: str(args.name),
+        title: str(args.title),
+        description: str(args.description),
+        color: str(args.color, 'purple'),
+      });
+      ctx.systemEvent({ kind: 'agent', label: 'Created bot', chip: agent.name, chipAgentId: agent.id });
+      return { output: `Created bot "${agent.name}" (id ${agent.id}). Use SendToAgent to give it work.` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'UpdateAgent',
+      description: 'Update your own profile (or another bot): name, title, description.',
+      parameters: {
+        type: 'object',
+        properties: { agent_id: { type: 'string' }, name: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' } },
+      },
+    },
+    surface: 'agent_write',
+    async run(ctx, args) {
+      const id = str(args.agent_id) || ctx.agentId;
+      const patch: Partial<Agent> = {};
+      if (str(args.name)) patch.name = str(args.name);
+      if (typeof args.title === 'string') patch.title = str(args.title);
+      if (typeof args.description === 'string') patch.description = str(args.description);
+      const next = ctx.runner.updateAgent(id, patch);
+      return next ? { output: `Updated ${next.name}.` } : { output: 'No such bot.', isError: true };
+    },
+  },
+
+  {
+    schema: {
+      name: 'SendToAgent',
+      description:
+        'Message another bot, or post into a room you belong to. Asynchronous: it returns right away and wakes them to work in their own chat. Give the id of a bot or of a channel.',
+      parameters: { type: 'object', properties: { agent_id: { type: 'string' }, text: { type: 'string' } }, required: ['agent_id', 'text'] },
+    },
+    async run(ctx, args) {
+      const id = str(args.agent_id);
+      const channel = ctx.store.getChannel(id);
+      if (channel) {
+        if (!channel.memberIds.includes(ctx.agentId)) return { output: `You are not in the ${channel.name} room.`, isError: true };
+        ctx.runner.postToRoom(channel.id, ctx.agentId, str(args.text));
+        ctx.systemEvent({ kind: 'handoff', label: 'Posted to', chip: channel.name });
+        return { output: `Posted in ${channel.name}. Everyone in the room sees it.` };
+      }
+
+      const target = ctx.store.getAgent(id);
+      if (!target) {
+        const list = ctx.store.listAgents().map((a) => `${a.name} -> ${a.id}`).join('\n');
+        return { output: `No such bot or room. Known bots:\n${list}`, isError: true };
+      }
+      ctx.runner.deliverToAgent(ctx.agentId, target.id, str(args.text));
+      ctx.systemEvent({ kind: 'handoff', label: 'Messaged', chip: target.name, chipAgentId: target.id });
+      return { output: `Sent to ${target.name}. They will work on it in their own chat.` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ListAgents',
+      description: 'List the other bots on this machine with their ids.',
+      parameters: { type: 'object', properties: {} },
+    },
+    async run(ctx) {
+      const list = ctx.store.listAgents().map((a) => `- ${a.name} (${a.id})${a.title ? ` - ${a.title}` : ''} [${a.status}]`);
+      return { output: list.join('\n') || 'No other bots yet.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'UpdateMemory',
+      description:
+        'Write something durable about how the user works, their preferences, or facts you should not have to ask twice. This memory is loaded into every future turn.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fact: { type: 'string', description: 'A self-contained statement, e.g. "The user ships on Fridays".' },
+          tier: {
+            type: 'string',
+            enum: ['profile', 'log', 'note'],
+            description:
+              'profile = who the user is, kept in mind every turn. log = substantive history (default). note = minor detail that fades fast.',
+          },
+          forget: { type: 'string', description: 'Exact text of a recorded fact to drop. Pair with a fact to correct it.' },
+        },
+      },
+    },
+    async run(ctx, args) {
+      const forget = str(args.forget);
+      const fact = str(args.fact);
+      if (forget) ctx.memory.forget(forget);
+      if (fact) ctx.memory.add((str(args.tier, 'log') as MemoryTier) || 'log', fact);
+      if (!forget && !fact) return { output: 'Give a fact to remember or a fact to forget.', isError: true };
+      ctx.systemEvent({ kind: 'memory', label: 'Updated memory', chip: (fact || forget).slice(0, 60) });
+      return { output: 'Memory updated.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'CreateRoutine',
+      description: 'Save a recurring task for yourself. It fires on a schedule and you run the prompt as if the user had sent it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          prompt: { type: 'string' },
+          every_minutes: { type: 'number' },
+          daily_at: { type: 'string', description: 'HH:MM, 24h' },
+          weekdays_at: { type: 'string', description: 'HH:MM, Monday to Friday only' },
+          weekly_on: { type: 'string', description: 'e.g. "mon 09:00"' },
+        },
+        required: ['name', 'prompt'],
+      },
+    },
+    surface: 'agent_write',
+    async run(ctx, args) {
+      const trigger = parseTrigger(args);
+      if (!trigger) return { output: 'Give one of every_minutes, daily_at, weekdays_at or weekly_on.', isError: true };
+      const routine: Routine = {
+        id: randomUUID(),
+        agentId: ctx.agentId,
+        name: str(args.name),
+        prompt: str(args.prompt),
+        triggers: [trigger],
+        enabled: true,
+        createdAt: Date.now(),
+      };
+      ctx.store.saveRoutine(routine);
+      ctx.emit({ type: 'routines', routines: ctx.store.listRoutines() });
+      ctx.systemEvent({ kind: 'routine', label: 'Created routine', chip: routine.name });
+      return { output: `Routine "${routine.name}" saved (${describeTrigger(trigger)}).` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ListRoutines',
+      description: 'List your routines.',
+      parameters: { type: 'object', properties: {} },
+    },
+    async run(ctx) {
+      const rs = ctx.store.listRoutines().filter((r) => r.agentId === ctx.agentId);
+      return {
+        output: rs.map((r) => `- ${r.name} [${describeTriggers(r.triggers)}]${r.enabled ? '' : ' (disabled)'} id=${r.id}`).join('\n') || 'No routines.',
+      };
+    },
+  },
+
+  {
+    schema: {
+      name: 'DeleteRoutine',
+      description: 'Delete one of your routines.',
+      parameters: { type: 'object', properties: { routine_id: { type: 'string' } }, required: ['routine_id'] },
+    },
+    surface: 'agent_write',
+    async run(ctx, args) {
+      ctx.store.deleteRoutine(str(args.routine_id));
+      ctx.emit({ type: 'routines', routines: ctx.store.listRoutines() });
+      return { output: 'Deleted.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'TodoWrite',
+      description: 'Keep a visible plan for a longer task. Replaces the current list.',
+      parameters: {
+        type: 'object',
+        properties: {
+          todos: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { content: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] } },
+              required: ['content', 'status'],
+            },
+          },
+        },
+        required: ['todos'],
+      },
+    },
+    async run(ctx, args) {
+      const todos = Array.isArray(args.todos) ? (args.todos as { content: string; status: string }[]) : [];
+      writeFileSync(join(ctx.store.agentDir(ctx.agentId), 'todos.json'), JSON.stringify(todos, null, 2), 'utf8');
+      const rendered = todos
+        .map((t) => `${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`)
+        .join('\n');
+      return { output: rendered || 'Cleared.' };
+    },
+  },
+  {
+    schema: {
+      name: 'AskUser',
+      description:
+        'Ask the user a question with buttons instead of prose, when you genuinely need a decision. Their pick comes back as their next message, so this ends your turn — stop after calling it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'A natural question, exactly as you would say it. Not "pick an option below".' },
+          options: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                value: { type: 'string', description: 'What comes back as their reply. Defaults to the label.' },
+                style: { type: 'string', enum: ['default', 'primary', 'danger'] },
+              },
+              required: ['label'],
+            },
+          },
+          allow_custom: { type: 'boolean', description: 'Let them type their own answer too.' },
+        },
+        required: ['prompt', 'options'],
+      },
+    },
+    async run(ctx, args) {
+      const raw = Array.isArray(args.options) ? (args.options as Record<string, unknown>[]) : [];
+      const options = raw
+        .map((o) => ({
+          label: str(o.label),
+          value: str(o.value) || str(o.label),
+          style: (str(o.style, 'default') as 'default' | 'primary' | 'danger') || 'default',
+        }))
+        .filter((o) => o.label);
+      if (options.length === 0) return { output: 'Give at least one option.', isError: true };
+      ctx.sendWidget({ prompt: str(args.prompt), options, allowCustom: args.allow_custom === true });
+      return { output: 'Question sent. End your turn now — their answer arrives as the next message.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'SaveSkill',
+      description:
+        'Save a reusable recipe you can look up later. The description decides when it applies, so write it as "use this when ...". A skill has no schedule — use CreateRoutine for something that should run on its own.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          description: { type: 'string', description: 'Use this when ...' },
+          body: { type: 'string', description: 'The recipe, in markdown.' },
+        },
+        required: ['name', 'description', 'body'],
+      },
+    },
+    surface: 'agent_write',
+    async run(ctx, args) {
+      const skill = ctx.skills.write(str(args.name), str(args.description), str(args.body));
+      ctx.systemEvent({ kind: 'note', label: 'Saved skill', chip: skill.name });
+      return { output: `Saved skill "${skill.name}".` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'ReadSkill',
+      description: 'Read the full body of one of your saved skills before following it.',
+      parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+    },
+    async run(ctx, args) {
+      const skill = ctx.skills.read(str(args.name));
+      if (!skill) return { output: 'No skill by that name.', isError: true };
+      return { output: `# ${skill.name}\n> ${skill.description}\n\n${skill.body}` };
+    },
+  },
+
+  {
+    schema: {
+      name: 'DeleteSkill',
+      description: 'Delete one of your saved skills.',
+      parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+    },
+    surface: 'agent_write',
+    async run(ctx, args) {
+      return { output: ctx.skills.delete(str(args.name)) ? 'Deleted.' : 'No skill by that name.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'HandOverComputer',
+      description:
+        "Show the user your screen and ask them to do the one step only they can do — a sign-in, 2FA, a captcha, a payment. You never see their credentials. Say what you need in one short line, then end your turn.",
+      parameters: {
+        type: 'object',
+        properties: { instruction: { type: 'string', description: 'One short line, e.g. "Sign in to your Google account".' } },
+        required: ['instruction'],
+      },
+    },
+    async run(ctx, args) {
+      await ctx.computer.handOver(ctx.agentId, str(args.instruction));
+      ctx.sendMessage(`${str(args.instruction)} — I opened the screen for you. Tell me when you're done and I'll pick it back up.`);
+      return { output: 'Handed the screen over. End your turn and wait for the user.' };
+    },
+  },
+
+  {
+    schema: {
+      name: 'Task',
+      description:
+        'Hand a self-contained chunk of work to a background worker and keep going. It runs on its own and reports back to you when it finishes, so never sit and wait for it. Scope it tight: the exact step, the specifics it needs, what "done" looks like, and what to report.',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            enum: ['browser', 'research', 'shell'],
+            description: 'browser drives your browser, research searches and reads the web, shell works in your box.',
+          },
+          description: { type: 'string', description: 'Three to five words naming the job.' },
+          prompt: { type: 'string', description: 'The full task, standalone — the worker sees none of this conversation.' },
+        },
+        required: ['kind', 'description', 'prompt'],
+      },
+    },
+    async run(ctx, args) {
+      const kind = str(args.kind, 'research') as 'browser' | 'research' | 'shell';
+      const id = ctx.runner.dispatchSubagent(ctx.agentId, kind, str(args.description), str(args.prompt));
+      return {
+        output: `Dispatched ${id} (${kind}). Keep working; you will be woken with its report. Use CheckSubagent ${id} if it seems stuck.`,
+      };
+    },
+  },
+
+  {
+    schema: {
+      name: 'CheckSubagent',
+      description: 'Look in on a background worker: status, recent actions, and its report so far. Use it to spot a stall, not to poll for completion.',
+      parameters: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+    },
+    async run(ctx, args) {
+      return { output: ctx.runner.checkSubagent(str(args.task_id)) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'StopSubagent',
+      description: 'Abort a background worker that is wedged or no longer needed.',
+      parameters: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
+    },
+    async run(ctx, args) {
+      return { output: ctx.runner.stopSubagent(str(args.task_id)) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'AwaitShell',
+      description: 'Wait for a background command you started earlier and read its output.',
+      parameters: {
+        type: 'object',
+        properties: { shell_id: { type: 'string' }, timeout_ms: { type: 'number' } },
+        required: ['shell_id'],
+      },
+    },
+    async run(ctx, args) {
+      return { output: clip(await ctx.awaitBackground(str(args.shell_id), num(args.timeout_ms, 120_000))) };
+    },
+  },
+];
+
+export function parseTrigger(args: Record<string, unknown>): RoutineTrigger | null {
+  if (typeof args.every_minutes === 'number' && args.every_minutes > 0) return { kind: 'interval', everyMinutes: args.every_minutes };
+
+  const weekdays = str(args.weekdays_at);
+  if (/^\d{1,2}:\d{2}$/.test(weekdays)) {
+    const [h, m] = weekdays.split(':');
+    return { kind: 'weekdays', hour: Number(h), minute: Number(m) };
+  }
+
+  const daily = str(args.daily_at);
+  if (/^\d{1,2}:\d{2}$/.test(daily)) {
+    const [h, m] = daily.split(':');
+    return { kind: 'daily', hour: Number(h), minute: Number(m) };
+  }
+
+  const weekly = str(args.weekly_on).toLowerCase();
+  const wm = /^(mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2}):(\d{2})$/.exec(weekly);
+  if (wm) {
+    const days = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+    return { kind: 'weekly', weekday: days.indexOf(wm[1]!), hour: Number(wm[2]), minute: Number(wm[3]) };
+  }
+  return null;
+}
+
+export function describeTrigger(t: RoutineTrigger): string {
+  if (t.kind === 'interval') return `every ${t.everyMinutes} min`;
+  const hh = String(t.hour).padStart(2, '0');
+  const mm = String(t.minute).padStart(2, '0');
+  if (t.kind === 'daily') return `daily at ${hh}:${mm}`;
+  if (t.kind === 'weekdays') return `weekdays at ${hh}:${mm}`;
+  return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][t.weekday]} at ${hh}:${mm}`;
+}
+
+export function describeTriggers(triggers: RoutineTrigger[]): string {
+  return triggers.map(describeTrigger).join(', ') || 'no schedule';
+}
+
+export const TOOLS_BY_NAME = new Map(TOOLS.map((t) => [t.schema.name, t]));
