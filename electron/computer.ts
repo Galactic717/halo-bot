@@ -367,36 +367,85 @@ export class Computer implements ComputerPort {
    */
   async snapshot(agentId: string): Promise<string> {
     const wc = this.screen(agentId).view.webContents;
+    /*
+     * The accessible name and role of everything on the page a person could act on.
+     *
+     * Not Playwright's `mode: "ai"` tree, which would mean a second browser beside the one Halo
+     * already owns — the wrong trade for an app whose whole point is *this* Chromium with *these*
+     * logins. It is the same idea done in the page: resolve the name the way a screen reader would
+     * (aria-labelledby, then aria-label, then the associated <label>, then placeholder, title, alt,
+     * then text), and take the roles rather than the tags, so a `div[role=button]` is a button and a
+     * custom component with a proper label is visible instead of skipped.
+     *
+     * The ref is written onto the node as an attribute, so resolving it later is a selector this
+     * process wrote rather than one the model guessed.
+     */
     const script = `(() => {
       const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) return false;
+        const style = getComputedStyle(el);
+        return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+      };
       const roleOf = (el) => {
         const explicit = el.getAttribute('role');
-        if (explicit) return explicit;
+        if (explicit) return explicit.split(/\\s+/)[0];
         const tag = el.tagName.toLowerCase();
-        if (tag === 'a') return 'link';
-        if (tag === 'button') return 'button';
+        if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
+        if (tag === 'button' || tag === 'summary') return 'button';
         if (tag === 'select') return 'combobox';
         if (tag === 'textarea') return 'textbox';
         if (tag === 'input') {
           const t = (el.getAttribute('type') || 'text').toLowerCase();
           if (t === 'checkbox' || t === 'radio') return t;
-          if (t === 'submit' || t === 'button') return 'button';
+          if (t === 'submit' || t === 'button' || t === 'reset' || t === 'image') return 'button';
+          if (t === 'range') return 'slider';
+          if (t === 'search') return 'searchbox';
+          if (t === 'hidden') return '';
           return 'textbox';
         }
-        return tag;
+        if (el.isContentEditable) return 'textbox';
+        return 'generic';
       };
+      // Roughly the accessible-name computation, in the order a screen reader applies it.
+      const nameOf = (el) => {
+        const by = el.getAttribute('aria-labelledby');
+        if (by) {
+          const parts = by.split(/\\s+/).map((id) => document.getElementById(id)).filter(Boolean);
+          const joined = clean(parts.map((n) => n.innerText || n.textContent || '').join(' '));
+          if (joined) return joined;
+        }
+        const label = el.getAttribute('aria-label');
+        if (clean(label)) return clean(label);
+        if (el.id) {
+          const associated = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+          if (associated && clean(associated.innerText)) return clean(associated.innerText);
+        }
+        const wrapping = el.closest('label');
+        if (wrapping && clean(wrapping.innerText)) return clean(wrapping.innerText);
+        for (const attr of ['placeholder', 'title', 'alt', 'value', 'name']) {
+          const v = clean(el.getAttribute(attr));
+          if (v) return v;
+        }
+        return clean(el.innerText || el.textContent || '');
+      };
+      const selector = 'a, button, summary, input, textarea, select, [role], [contenteditable=""], [contenteditable="true"], [tabindex]';
+      const acting = new Set(['button','link','checkbox','radio','textbox','searchbox','combobox','listbox','option','slider','spinbutton','switch','tab','menuitem','menuitemcheckbox','menuitemradio','treeitem']);
       const out = [];
-      const nodes = document.querySelectorAll('a[href], button, input, textarea, select, [role=button], [role=link], [role=tab], [role=menuitem]');
       let n = 0;
-      for (const el of nodes) {
-        const r = el.getBoundingClientRect();
-        if (r.width < 2 || r.height < 2) continue;
-        const name = clean(el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.name || '');
+      for (const el of document.querySelectorAll(selector)) {
+        const role = roleOf(el);
+        if (!acting.has(role)) continue;
+        if (!visible(el)) continue;
+        if (el.disabled === true || el.getAttribute('aria-disabled') === 'true') continue;
+        const name = nameOf(el);
         if (!name) continue;
         n += 1;
         el.setAttribute('data-halo-ref', 'e' + n);
-        out.push({ ref: 'e' + n, role: roleOf(el), name: name.slice(0, 80), selector: '[data-halo-ref="e' + n + '"]' });
-        if (out.length >= 120) break;
+        const state = el.checked === true ? ' [checked]' : el.getAttribute('aria-expanded') === 'true' ? ' [expanded]' : '';
+        out.push({ ref: 'e' + n, role: role + state, name: name.slice(0, 80), selector: '[data-halo-ref="e' + n + '"]' });
+        if (out.length >= 150) break;
       }
       return JSON.stringify({ url: location.href, title: document.title, elements: out });
     })()`;

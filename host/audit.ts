@@ -1,3 +1,4 @@
+// The decide-record-act ordering is adapted from OpenBot (MIT, (c) 2026 CopilotKit). See NOTICE.
 import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AuditRow } from './types.ts';

@@ -76,7 +76,7 @@ export class Store {
     for (const c of this.readJson<Channel[]>(this.channelsPath, [])) this.channels.set(c.id, c);
     for (const id of this.listAgentIds()) {
       const a = this.readJson<Agent | null>(join(this.agentsDir, id, 'agent.json'), null);
-      if (a) this.agents.set(a.id, { ...a, status: 'idle' });
+      if (a) this.agents.set(a.id, { ...a, status: 'idle', ...this.unsealAgent(a) });
     }
   }
 
@@ -199,6 +199,8 @@ export class Store {
       ...(input.model ? { model: input.model } : {}),
       ...(input.localExecution ? { localExecution: input.localExecution } : {}),
       ...(input.allowedPaths?.length ? { allowedPaths: [...input.allowedPaths] } : {}),
+      ...(input.endpoint ? { endpoint: input.endpoint } : {}),
+      ...(input.endpointAuth ? { endpointAuth: input.endpointAuth } : {}),
       ...(input.pinned ? { pinned: true } : {}),
       ...(input.hidden ? { hidden: true } : {}),
     };
@@ -229,7 +231,30 @@ export class Store {
   private persistAgent(agent: Agent) {
     mkdirSync(this.agentDir(agent.id), { recursive: true });
     const { status, ...rest } = agent;
-    this.writeJson(join(this.agentDir(agent.id), 'agent.json'), rest);
+    // The endpoint's Authorization header is a credential like any other: sealed before it reaches
+    // disk, and re-sealed on every write so one written before a keychain existed does not stay clear.
+    this.writeJson(join(this.agentDir(agent.id), 'agent.json'), { ...rest, ...this.sealAgent(rest) });
+  }
+
+  private sealAgent(agent: Partial<Agent>): Partial<Agent> {
+    const value = agent.endpointAuth;
+    if (!this.secrets || !value || value.startsWith(SEALED)) return {};
+    try {
+      return { endpointAuth: `${SEALED}${this.secrets.encrypt(value)}` };
+    } catch {
+      return {};
+    }
+  }
+
+  private unsealAgent(agent: Partial<Agent>): Partial<Agent> {
+    const value = agent.endpointAuth;
+    if (!this.secrets || !value || !value.startsWith(SEALED)) return {};
+    try {
+      return { endpointAuth: this.secrets.decrypt(value.slice(SEALED.length)) };
+    } catch {
+      // Sealed on another machine or profile: unrecoverable, and an empty one asks to be re-entered.
+      return { endpointAuth: '' };
+    }
   }
 
   touchAgent(id: string) {

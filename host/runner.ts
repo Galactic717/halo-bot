@@ -8,6 +8,7 @@ import { chat, classifyProviderError, describeFailure, ProviderError, type ChatM
 import { buildSystemPrompt, REPLY_REMINDER } from './prompt.ts';
 import { decideDetailed, reviewWithModel, summarize, type Verdict } from './policy.ts';
 import { AuditLog } from './audit.ts';
+import { runAgUi, type AgUiMessage } from './agui.ts';
 import { TOOLS, TOOLS_BY_NAME, describeTriggers, type ComputerPort, type RunnerPort, type Tool, type ToolContext } from './tools.ts';
 import type { SubagentKind, SubagentRun } from './subagents.ts';
 import { mentionedNames } from './mentions.ts';
@@ -60,6 +61,8 @@ export class Runner implements RunnerPort {
   private subagents = new Map<string, SubagentRun>();
   /** How many bot-to-bot hops a room has taken since the user last spoke. */
   private channelHops = new Map<string, number>();
+  /** Run state an AG-UI agent handed back, per conversation, so a graph keeps its place. */
+  private remoteState = new Map<string, unknown>();
 
   constructor(opts: RunnerOptions) {
     this.store = opts.store;
@@ -411,7 +414,7 @@ export class Runner implements RunnerPort {
       memory: this.memory(parentAgentId),
       skills: this.skills(parentAgentId),
       sendWidget: () => ({ id: 'sub', agentId: parentAgentId, role: 'agent', text: '', createdAt: Date.now() } as Message),
-      startBackground: (command, cwd) => this.startBackground(parentAgentId, command, cwd),
+      startBackground: (command, cwd, confined) => this.startBackground(parentAgentId, command, cwd, confined),
       awaitBackground: (id, timeoutMs) => this.awaitBackground(id, timeoutMs),
     };
 
@@ -500,10 +503,10 @@ export class Runner implements RunnerPort {
   }
 
   /** Long commands run detached and wake the agent up when they finish. */
-  private startBackground(agentId: string, command: string, cwd: string): string {
+  private startBackground(agentId: string, command: string, cwd: string, confined = false): string {
     const id = `sh_${Math.random().toString(36).slice(2, 8)}`;
     const controller = new AbortController();
-    const promise = runShell(command, cwd, controller.signal, 30 * 60_000);
+    const promise = runShell(command, cwd, controller.signal, 30 * 60_000, confined);
     const entry = { promise, done: false, command, agentId, startedAt: Date.now() };
     this.background.set(id, entry);
     void promise.then(({ code, out }) => {
@@ -750,7 +753,7 @@ export class Runner implements RunnerPort {
         deliveredSomething = true;
         return msg;
       },
-      startBackground: (command, cwd) => this.startBackground(agentId, command, cwd),
+      startBackground: (command, cwd, confined) => this.startBackground(agentId, command, cwd, confined),
       awaitBackground: (id, timeoutMs) => this.awaitBackground(id, timeoutMs),
       systemEvent: (event) => {
         this.systemEvent(agentId, event);
@@ -783,7 +786,14 @@ export class Runner implements RunnerPort {
 
         let result;
         try {
-          result = await chat(providerForAgent, messages, this.toolSchemas(), stream, abort.signal);
+          /*
+           * A bot with an endpoint is somebody else's agent, on any framework, run through AG-UI.
+           * It is offered Halo's toolset and the calls it makes come back here — through the same
+           * gate, onto the same trail — so hosting a foreign agent is not the same as trusting it.
+           */
+          result = agent.endpoint
+            ? await this.runRemote(agent, historyId, messages, stream, abort.signal)
+            : await chat(providerForAgent, messages, this.toolSchemas(), stream, abort.signal);
         } catch (error) {
           /*
            * The one failure worth a second attempt after changing something.
@@ -803,7 +813,9 @@ export class Runner implements RunnerPort {
             ...this.history(historyId, historySuffix),
           ]);
           streamed = '';
-          result = await chat(providerForAgent, retried, this.toolSchemas(), stream, abort.signal);
+          result = agent.endpoint
+            ? await this.runRemote(agent, historyId, retried, stream, abort.signal)
+            : await chat(providerForAgent, retried, this.toolSchemas(), stream, abort.signal);
         }
 
         this.store.recordUsage({
@@ -914,9 +926,21 @@ export class Runner implements RunnerPort {
     // page this process looked at rather than from whatever the model called it.
     if (tool.schema.name === 'Browser' && typeof args.ref === 'string') {
       const element = this.computer.describeRef(agentId, args.ref);
-      if (element) action.summary = `${action.summary} — ${element.role} "${element.name}"`;
+      if (element) {
+        action.element = element;
+        action.summary = `${action.summary} — ${element.role} "${element.name}"`;
+      }
     }
-    let verdict: Verdict = decideDetailed(settings, tool.surface, action, this.store.getAgent(agentId));
+    // A broken rule fails closed by design; it must not do so silently, or somebody's typo becomes a
+    // bot that refuses everything for a week with nothing saying why.
+    const broken: string[] = [];
+    let verdict: Verdict = decideDetailed(settings, tool.surface, action, this.store.getAgent(agentId), agentId, (message) =>
+      broken.push(message),
+    );
+    for (const message of broken) {
+      this.systemEvent(agentId, { kind: 'permission', label: message.slice(0, 160) });
+      onNote?.(message);
+    }
 
     // Smart mode asks the model about anything the local rules would wave through.
     if (
@@ -1058,6 +1082,42 @@ export class Runner implements RunnerPort {
       return { output: `Tool failed: ${message}` };
     }
   }
+  /**
+   * One turn against an AG-UI endpoint, shaped like a provider result so the loop above does not
+   * care which kind of bot it is driving.
+   *
+   * The run state the agent hands back is kept per conversation and given straight back on the next
+   * turn: an agent built on a graph keeps its own place in that graph, which is the point of the
+   * protocol carrying state at all. Usage comes back as zeroes because somebody else's endpoint bills
+   * somebody else's tokens, and inventing numbers for the Usage screen would be worse than a gap.
+   */
+  private async runRemote(
+    agent: Agent,
+    historyId: string,
+    messages: ChatMessage[],
+    onDelta: (chunk: string) => void,
+    signal: AbortSignal,
+  ) {
+    const run = await runAgUi({
+      endpoint: agent.endpoint!,
+      ...(agent.endpointAuth ? { authHeader: agent.endpointAuth } : {}),
+      threadId: historyId,
+      runId: randomUUID(),
+      messages: messages.map(toAgUiMessage),
+      tools: this.toolSchemas(),
+      state: this.remoteState.get(historyId),
+      onDelta,
+      signal,
+    });
+    this.remoteState.set(historyId, run.state);
+    return {
+      text: run.text,
+      toolCalls: run.toolCalls,
+      finishReason: run.toolCalls.length ? 'tool_calls' : 'stop',
+      usage: { promptTokens: 0, completionTokens: 0 },
+    };
+  }
+
   private async rememberExchange(agentId: string, userText: string) {
     const transcript = this.store.transcript(agentId);
     const reply = [...transcript].reverse().find((m) => m.role === 'agent' && m.text.trim().length > 0);
@@ -1171,6 +1231,19 @@ function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
     out[key] = /token|secret|password|key|auth/i.test(key) ? '[withheld]' : value;
   }
   return out;
+}
+
+/** Halo's stored message shape as AG-UI sees it. Ids are stable per position within one run. */
+function toAgUiMessage(message: ChatMessage, index: number): AgUiMessage {
+  const role = message.role === 'tool' ? 'tool' : message.role;
+  return {
+    id: `m${index}`,
+    role: role as AgUiMessage['role'],
+    content: message.content ?? '',
+    ...(message.name ? { name: message.name } : {}),
+    ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
+    ...(message.tool_calls ? { toolCalls: message.tool_calls } : {}),
+  };
 }
 
 const IMAGE_TYPES: Record<string, string> = {

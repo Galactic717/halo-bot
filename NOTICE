@@ -1,0 +1,71 @@
+Halo Bot
+========
+
+Halo Bot is a local clone of the Grok Bot model of working, built from a teardown of that product
+rather than from its code. See docs/GROK_BOT_TEARDOWN.md.
+
+Parts of the approval floor, the audit trail, the browser snapshot, the take-the-wheel state and the
+retry policy are ports of decisions — and in a few places of logic — from two MIT-licensed projects.
+Both are named at the point of use in the source, and the full teardown is in
+docs/OPENBOT_HERMES_TEARDOWN.md.
+
+--------------------------------------------------------------------------------
+OpenBot — https://github.com/CopilotKit/OpenBot
+
+  MIT License
+
+  Copyright (c) 2026 CopilotKit
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+  associated documentation files (the "Software"), to deal in the Software without restriction,
+  including without limitation the rights to use, copy, modify, merge, publish, distribute,
+  sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+  NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+  OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  Used in: host/policy.ts (intent taxonomy, deny-before-allow, neutral field binding, dry-run),
+  host/audit.ts and host/runner.ts (decide-record-act ordering, the separate failure row),
+  host/expression.ts (the case for an expression language over a rule table),
+  host/tools.ts (shell environment allow-list),
+  electron/computer.ts (ref resolution against a server-held snapshot, the control state machine),
+  host/agui.ts (AG-UI as the way a foreign agent arrives).
+
+--------------------------------------------------------------------------------
+Hermes Agent — https://github.com/NousResearch/hermes-agent
+
+  MIT License
+
+  Copyright (c) 2025 Nous Research
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+  associated documentation files (the "Software"), to deal in the Software without restriction,
+  including without limitation the rights to use, copy, modify, merge, publish, distribute,
+  sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+  NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+  OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  Used in: host/policy.ts (the hardline floor kept outside the approval system, the Windows
+  destructive-command tier, command-position anchoring, quote masking, shell-carrier payload
+  variants, the injection-hardened reviewer prompt and its trusted/untrusted channel split),
+  host/provider.ts (typed failure reasons and their classification precedence, the retry policy),
+  host/scheduler.ts (routine preflight, failure streak, continuity).
+
+--------------------------------------------------------------------------------
+Electron, React and the other runtime dependencies carry their own licences; see package.json and
+node_modules for those.

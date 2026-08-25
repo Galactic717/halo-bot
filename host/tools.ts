@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { boxHelper, canConfine } from './box.ts';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, relative, resolve, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -46,7 +47,8 @@ export interface ToolContext {
   memory: MemoryStore;
   skills: SkillStore;
   sendWidget: (widget: Widget) => Message;
-  startBackground: (command: string, cwd: string, external: boolean) => string;
+  /** `confined` runs it through the low-integrity box helper, the same as a foreground box command. */
+  startBackground: (command: string, cwd: string, confined: boolean) => string;
   awaitBackground: (id: string, timeoutMs: number) => Promise<string>;
 }
 
@@ -134,14 +136,40 @@ export function shellEnvironment(source: NodeJS.ProcessEnv = process.env): Recor
   return env;
 }
 
-export function runShell(command: string, cwd: string, signal: AbortSignal, timeoutMs = 120_000): Promise<{ code: number; out: string }> {
+/**
+ * Runs a command, confined when it is the bot's own and it can be.
+ *
+ * `confined` is the difference between the two shells Halo has. A command in the box runs through
+ * `halo-box.exe` at Low integrity inside a job object, so the kernel refuses every write outside the
+ * box whatever the command says. A command on the user's machine — `ExternalShell`, already through
+ * the approval gate — deliberately does not: the whole point of that surface is to act with the
+ * user's own rights, on purpose, once they have said yes.
+ *
+ * Falls back to plain PowerShell when the helper is missing or the box could not be labelled, because
+ * a bot that cannot run anything is worse than one running as it did last week. `verifyConfinement`
+ * is what tells the user which of the two they have.
+ */
+export function runShell(
+  command: string,
+  cwd: string,
+  signal: AbortSignal,
+  timeoutMs = 120_000,
+  confined = false,
+): Promise<{ code: number; out: string }> {
   return new Promise((resolveP) => {
     mkdirSync(cwd, { recursive: true });
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
-      { cwd, windowsHide: true, env: shellEnvironment() },
-    );
+    const helper = confined && canConfine(cwd, process.resourcesPath) ? boxHelper(process.resourcesPath) : null;
+    const child = helper
+      ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], {
+          cwd,
+          windowsHide: true,
+          env: shellEnvironment(),
+        })
+      : spawn(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
+          { cwd, windowsHide: true, env: shellEnvironment() },
+        );
     let out = '';
     const push = (b: Buffer) => {
       out += b.toString('utf8');
@@ -280,10 +308,10 @@ export const TOOLS: Tool[] = [
     async run(ctx, args) {
       const cwd = str(args.cwd) ? boxPath(ctx, str(args.cwd)) : ctx.store.boxDir(ctx.agentId);
       if (args.background === true) {
-        const id = ctx.startBackground(str(args.command), cwd, false);
+        const id = ctx.startBackground(str(args.command), cwd, true);
         return { output: `Started in the background as ${id}. Keep working; you will be told when it finishes.` };
       }
-      const { code, out } = await runShell(str(args.command), cwd, ctx.signal, num(args.timeout_ms, 120_000));
+      const { code, out } = await runShell(str(args.command), cwd, ctx.signal, num(args.timeout_ms, 120_000), true);
       return { output: clip(`exit ${code}\n${out || '(no output)'}`), isError: code !== 0 };
     },
   },

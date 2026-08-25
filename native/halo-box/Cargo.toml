@@ -1,0 +1,18 @@
+[package]
+name = "halo-box"
+version = "0.1.0"
+edition = "2021"
+
+# No crates. Everything here is a handful of Win32 calls declared by hand, so the helper builds
+# offline, in seconds, and carries nothing anybody has to audit but this file and main.rs.
+[dependencies]
+
+[[bin]]
+name = "halo-box"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

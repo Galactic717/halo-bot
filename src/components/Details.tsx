@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Agent, Routine, RoutineTrigger } from '../../host/types';
+import { checkEndpoint } from '../../host/agui';
 import { Avatar, AVATAR_COLORS } from './Avatar';
 import {
   ChevronLeftIcon,
@@ -525,12 +526,16 @@ function AgentSettings({
   const [boxDir, setBoxDir] = useState('');
   const [model, setModel] = useState(agent.model ?? '');
   const [models, setModels] = useState<string[]>([]);
+  const [endpoint, setEndpoint] = useState(agent.endpoint ?? '');
+  const [endpointAuth, setEndpointAuth] = useState('');
+  const [endpointError, setEndpointError] = useState('');
 
   useEffect(() => {
     setName(agent.name);
     setTitle(agent.title);
     setDescription(agent.description);
     setModel(agent.model ?? '');
+    setEndpoint(agent.endpoint ?? '');
     void window.halo.memory(agent.id).then(setMemory);
     void window.halo.boxDir(agent.id).then(setBoxDir);
     void window.halo.models().then((result) => {
@@ -617,6 +622,49 @@ function AgentSettings({
         </datalist>
         <div className="setting-row__desc">Give a heavy bot a bigger model and a watcher a small one.</div>
       </div>
+
+      {/*
+        An agent somebody else wrote, on any framework, over AG-UI. It is offered Halo's tools and
+        every call it makes still goes through the approval gate and onto the trail — which is why
+        this can be a text box rather than a decision about trust. Only a person sets it; no tool can.
+      */}
+      <div className="field">
+        <label>Agent endpoint</label>
+        <input
+          className="input"
+          value={endpoint}
+          placeholder="http://localhost:8000/ (AG-UI, optional)"
+          onChange={(e) => setEndpoint(e.target.value)}
+          onBlur={() => {
+            const value = endpoint.trim();
+            const verdict = value ? checkEndpoint(value) : ({ ok: true, url: '' } as const);
+            if (!verdict.ok) {
+              setEndpointError(verdict.reason);
+              return;
+            }
+            setEndpointError('');
+            void onUpdateAgent({ endpoint: value });
+          }}
+        />
+        <div className="setting-row__desc" data-tone={endpointError ? 'danger' : undefined}>
+          {endpointError || 'Runs this bot on an AG-UI agent instead of the local loop. Leave empty for the normal bot.'}
+        </div>
+      </div>
+
+      {endpoint.trim() !== '' && (
+        <div className="field">
+          <label>Authorization header</label>
+          <input
+            className="input"
+            type="password"
+            value={endpointAuth}
+            placeholder={agent.endpointAuth ? '••••••••' : 'Bearer …'}
+            onChange={(e) => setEndpointAuth(e.target.value)}
+            onBlur={() => endpointAuth && void onUpdateAgent({ endpointAuth })}
+          />
+          <div className="setting-row__desc">Encrypted with the OS keychain before it is written, like the API key.</div>
+        </div>
+      )}
 
       <div className="card">
         <div className="setting-row">

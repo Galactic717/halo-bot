@@ -1,4 +1,7 @@
+// Portions adapted from Hermes Agent (MIT, (c) 2025 Nous Research) and OpenBot (MIT, (c) 2026
+// CopilotKit). See NOTICE and docs/OPENBOT_HERMES_TEARDOWN.md.
 import { complete } from './provider.ts';
+import { matchesExpression } from './expression.ts';
 import { normalize as normalizePath, relative, isAbsolute } from 'node:path';
 import type { Agent, ApprovalRequest, AutoReviewRule, Settings } from './types.ts';
 
@@ -37,6 +40,41 @@ export interface ActionSummary {
   intent?: Intent;
   /** The command verbatim, when there is one. Only this field is matched against the danger lists. */
   command?: string;
+  /** The tool that asked, so a rule can name mechanism when it really means mechanism. */
+  tool?: string;
+  /** The page a browser action is on. */
+  url?: string;
+  /** What a cited ref resolved to, filled in by the gate from the snapshot this process took. */
+  element?: { role: string; name: string };
+}
+
+/**
+ * What a rule expression is evaluated against.
+ *
+ * Every field is bound, present or not. A missing one would be an unknown name to the evaluator, and
+ * a rule naming a field this action does not have would then be broken — which fails closed, and
+ * would refuse every click in the app the moment somebody wrote a rule about their shell. Neutral
+ * rather than absent: `contains(command, "rm -rf")` is false for a click, which is the honest answer
+ * to "is this click running rm -rf". Straight out of OpenBot's gateway, which learned it the hard way.
+ */
+export function policyContext(
+  surface: ApprovalRequest['surface'],
+  action: ActionSummary,
+  agentId = '',
+): Record<string, unknown> {
+  return {
+    surface,
+    intent: action.intent ?? '',
+    summary: action.summary,
+    detail: action.detail,
+    command: action.command ?? '',
+    path: action.path ?? '',
+    outsideBox: action.outsideBox === true,
+    tool: { name: action.tool ?? '' },
+    bot: { id: agentId },
+    page: { url: action.url ?? '', host: action.url ? hostOf(action.url) : '' },
+    element: { role: action.element?.role ?? '', name: action.element?.name ?? '' },
+  };
 }
 
 /** Where a verdict came from, so the audit row and the approval card can both say why. */
@@ -298,7 +336,20 @@ function normalize(text: string): string[] {
  * looked at at all, and a rule carrying `commandPrefix` only covers commands that start that way.
  * A rule with none of those is the old free-text kind, matched by word overlap, and still works.
  */
-function ruleApplies(rule: AutoReviewRule, surface: ApprovalRequest['surface'], action: ActionSummary): boolean {
+function ruleApplies(
+  rule: AutoReviewRule,
+  surface: ApprovalRequest['surface'],
+  action: ActionSummary,
+  agentId?: string,
+  report?: (message: string) => void,
+): boolean {
+  // An expression rule is the whole test: it can name the surface itself, and mixing the two would
+  // make one rule mean different things depending on which fields somebody happened to fill in.
+  if (rule.expression) {
+    // A broken rule counts as a match when it denies and as no match when it allows, so a typo
+    // refuses rather than quietly permitting.
+    return matchesExpression(rule.expression, policyContext(surface, action, agentId), rule.decision !== 'allow', report);
+  }
   if (rule.surface && rule.surface !== surface) return false;
   if (rule.intent && rule.intent !== action.intent) return false;
   if (rule.commandPrefix) {
@@ -324,8 +375,10 @@ export function matchingRule(
   settings: Settings,
   surface: ApprovalRequest['surface'],
   action: ActionSummary,
+  agentId?: string,
+  report?: (message: string) => void,
 ): AutoReviewRule | null {
-  const applying = settings.rules.filter((rule) => ruleApplies(rule, surface, action));
+  const applying = settings.rules.filter((rule) => ruleApplies(rule, surface, action, agentId, report));
   return (
     applying.find((r) => r.decision === 'deny') ??
     applying.find((r) => r.decision === 'ask') ??
@@ -365,6 +418,9 @@ export function decideDetailed(
   surface: ApprovalRequest['surface'],
   action: ActionSummary,
   agent?: Pick<Agent, 'localExecution' | 'allowedPaths'>,
+  agentId?: string,
+  /** Where a broken rule is reported, so it is loud rather than silently fail-closed. */
+  report?: (message: string) => void,
 ): Verdict {
   // The floor, before anything else and regardless of everything else.
   const hardline = hardlineFinding(action.command ?? action.detail);
@@ -377,7 +433,7 @@ export function decideDetailed(
     };
   }
 
-  const rule = matchingRule(settings, surface, action);
+  const rule = matchingRule(settings, surface, action, agentId, report);
   if (rule?.decision === 'deny') {
     return { decision: 'deny', source: 'rule', matched: rule.when, reason: `Your rule "${rule.when}" forbids this.` };
   }
@@ -468,6 +524,10 @@ function browserIntent(action: string): Intent {
 }
 
 export function summarize(toolName: string, args: Record<string, unknown>, boxDir = ''): ActionSummary {
+  return { ...describe(toolName, args, boxDir), tool: toolName };
+}
+
+function describe(toolName: string, args: Record<string, unknown>, boxDir: string): ActionSummary {
   const pick = (k: string): string => (typeof args[k] === 'string' ? (args[k] as string) : '');
   const intent = intentOf(toolName);
   switch (toolName) {
@@ -507,6 +567,7 @@ export function summarize(toolName: string, args: Record<string, unknown>, boxDi
         summary: `Browser: ${what}${pick('url') ? ` ${hostOf(pick('url'))}` : ''}`,
         detail: pick('url') || pick('selector') || pick('ref') || pick('text'),
         intent: browserIntent(what),
+        ...(pick('url') ? { url: pick('url') } : {}),
       };
     }
     case 'CreateAgent':

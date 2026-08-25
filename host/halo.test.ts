@@ -21,6 +21,8 @@ import {
 import { commandPrefixOf } from './runner.ts';
 import { AuditLog, redact, scrub } from './audit.ts';
 import { preflight } from './scheduler.ts';
+import { checkExpression, matchesExpression } from './expression.ts';
+import { checkEndpoint } from './agui.ts';
 import { parseTrigger, describeTrigger } from './tools.ts';
 import { DEFAULT_SETTINGS } from './store.ts';
 import { mentionedNames } from './mentions.ts';
@@ -609,4 +611,73 @@ test('a chosen category shows everything on that shelf, and a query flattens int
   assert.ok(scoped[0]!.plugins.every((s) => s.category === 'Research'));
 
   assert.deepEqual(shelves(MCP_CATALOG, 'All', 'qqqzzz')[0]?.plugins, []);
+});
+
+
+test('an expression rule says what a field rule cannot', () => {
+  const click = {
+    surface: 'browser',
+    intent: 'activate',
+    command: '',
+    path: '',
+    page: { url: 'https://shop.example.com/cart', host: 'shop.example.com' },
+    element: { role: 'button', name: 'Place order' },
+    tool: { name: 'Browser' },
+    bot: { id: 'b1' },
+    summary: '',
+    detail: '',
+    outsideBox: false,
+  };
+
+  // The sentence somebody actually wants: never press anything that says order, off our own domain.
+  const rule = 'intent == "activate" && contains(element.name, "order") && page.host != "ours.example.com"';
+  assert.equal(matchesExpression(rule, click, true), true);
+  assert.equal(matchesExpression(rule, { ...click, page: { url: '', host: 'ours.example.com' } }, true), false);
+  assert.equal(matchesExpression(rule, { ...click, element: { role: 'button', name: 'Back' } }, true), false);
+
+  // A rule naming a field this action does not have is false, not broken: every field is bound
+  // neutrally, which is what stops a shell rule from refusing every click in the app.
+  assert.equal(matchesExpression('contains(command, "rm -rf")', click, true), false);
+
+  // Broken rules fail closed for a deny and open for an allow, and say so rather than going quiet.
+  const said: string[] = [];
+  assert.equal(matchesExpression('contains(element.name', click, true, (m) => said.push(m)), true);
+  assert.equal(matchesExpression('contains(element.name', click, false, (m) => said.push(m)), false);
+  assert.equal(said.length, 2);
+
+  // A rule that answers with a string is not an answer to "does this apply".
+  assert.equal(matchesExpression('"Place order"', click, true), true);
+  assert.equal(matchesExpression('"Place order"', click, false), false);
+
+  assert.equal(checkExpression('matches(command, "^git ")').ok, true);
+  assert.equal(checkExpression('contains(a, ').ok, false);
+
+  // Nothing in the language can reach the host.
+  assert.equal(matchesExpression('constructor', click, false), false);
+  assert.equal(matchesExpression('process.exit(1)', click, false), false);
+});
+
+test('an expression rule reaches the gate and beats a broader allow', () => {
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    localExecution: 'allow' as const,
+    rules: [
+      { id: '1', when: 'anything', decision: 'allow' as const, surface: 'external_shell' as const },
+      { id: '2', when: 'never publish', decision: 'deny' as const, expression: 'contains(command, "npm publish")' },
+    ],
+  };
+  const cmd = (command: string) => summarize('ExternalShell', { command });
+  assert.equal(decide(settings, 'external_shell', cmd('npm publish --access public')), 'deny');
+  assert.equal(decide(settings, 'external_shell', cmd('npm install')), 'allow');
+});
+
+test('an agent endpoint is checked before anything is sent to it', () => {
+  assert.equal(checkEndpoint('http://localhost:8000/').ok, true);
+  assert.equal(checkEndpoint('https://agents.example.com/run').ok, true);
+  // A desktop's whole point is the server the user just started on their own machine.
+  assert.equal(checkEndpoint('http://192.168.1.20:9000/').ok, true);
+  assert.equal(checkEndpoint('file:///C:/x').ok, false);
+  assert.equal(checkEndpoint('not a url').ok, false);
+  // The one private address that is never what somebody meant.
+  assert.equal(checkEndpoint('http://169.254.169.254/latest/meta-data/').ok, false);
 });

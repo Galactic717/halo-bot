@@ -25,6 +25,16 @@ export interface Agent {
   localExecution?: 'inherit' | 'ask' | 'allow' | 'never';
   /** Folders on the user's machine this bot may work in without asking each time. */
   allowedPaths?: string[];
+  /**
+   * An AG-UI endpoint that runs this bot's turns instead of Halo's own loop.
+   *
+   * The agent on the other end can be written on any framework. It is offered Halo's toolset and
+   * every call it makes comes back through the same approval gate and audit trail, so hosting
+   * somebody else's agent does not mean trusting it. Only a person can set this.
+   */
+  endpoint?: string;
+  /** Sent as the Authorization header to that endpoint. Sealed with the OS keychain like the API key. */
+  endpointAuth?: string;
 }
 
 export interface UsageRow {
@@ -184,6 +194,14 @@ export interface AutoReviewRule {
    * anything; a prefix keeps the permission to the shape of command that was actually approved.
    */
   commandPrefix?: string;
+  /**
+   * A rule written as an expression instead of as fields.
+   *
+   * `intent == "run_command" && contains(command, "npm publish")`. When present it is the whole
+   * test — surface, intent and commandPrefix are ignored, because one rule meaning different things
+   * depending on which boxes happen to be filled in is worse than two rules.
+   */
+  expression?: string;
 }
 
 /** One decided action, written before it runs. See host/audit.ts. */

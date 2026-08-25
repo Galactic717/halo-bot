@@ -1,3 +1,5 @@
+// The failure-reason vocabulary and retry policy are adapted from Hermes Agent (MIT, (c) 2025 Nous
+// Research). See NOTICE.
 import type { Settings } from './types.ts';
 
 export interface ChatMessage {
