@@ -704,6 +704,8 @@ export class Runner implements RunnerPort {
     let compactedForOverflow = false;
     /** What the bot actually told the user, so a routine can be fed its own last report. */
     let lastDelivered = '';
+    /** How much of the request the server admitted it read, used to spot a truncating context window. */
+    let lastPromptTokens = 0;
     const sentTexts = new Set<string>();
     const ctx: ToolContext = {
       agentId,
@@ -818,6 +820,7 @@ export class Runner implements RunnerPort {
             : await chat(providerForAgent, retried, this.toolSchemas(), stream, abort.signal);
         }
 
+        lastPromptTokens = result.usage.promptTokens;
         this.store.recordUsage({
           at: Date.now(),
           agentId,
@@ -890,7 +893,21 @@ export class Runner implements RunnerPort {
       }
 
       if (!deliveredSomething && !abort.signal.aborted) {
-        this.systemEvent(agentId, { kind: 'note', label: 'Finished without sending a message' });
+        /*
+         * Almost always the same cause, and it is worth naming rather than leaving as a shrug.
+         *
+         * Halo's system prompt plus its tool schemas is several thousand tokens. A server running a
+         * smaller context window than that silently truncates the request, so the model never sees
+         * the instructions it is being judged against — it answers in plain text, gets nudged, and
+         * then produces nothing. Ollama ships a 4096-token default, which is below the floor here.
+         */
+        const short = lastPromptTokens > 0 && lastPromptTokens < PROMPT_FLOOR_TOKENS;
+        this.systemEvent(agentId, {
+          kind: 'note',
+          label: short
+            ? `Finished without sending a message — the model only saw ${lastPromptTokens} tokens of a longer prompt, so its context window is too small. Raise it (for Ollama: OLLAMA_CONTEXT_LENGTH=16384).`
+            : 'Finished without sending a message',
+        });
       }
 
       void this.rememberExchange(agentId, userText);
@@ -1118,6 +1135,38 @@ export class Runner implements RunnerPort {
     };
   }
 
+  /**
+   * Runs one tool through the real gate, with no model in the loop.
+   *
+   * For scripts/verify.mts. Asking a model to attempt a wipe tests whether that model is willing,
+   * which is not a property of Halo — a well-behaved one refuses on its own and the floor is never
+   * reached. This drives the gate directly, which is the thing that has to hold when the model is
+   * not well behaved.
+   */
+  async runToolForTest(agentId: string, toolName: string, args: Record<string, unknown>): Promise<string> {
+    const tool = TOOLS_BY_NAME.get(toolName);
+    if (!tool) return `No tool named ${toolName}.`;
+    const gate = await this.gate(agentId, tool, args, new AbortController().signal);
+    if (!gate.allowed) return gate.output;
+    const ctx = {
+      agentId,
+      store: this.store,
+      emit: () => {},
+      sendMessage: () => ({}) as Message,
+      requestApproval: () => Promise.resolve('never' as ApprovalDecision),
+      systemEvent: () => {},
+      computer: this.computer,
+      runner: this,
+      signal: new AbortController().signal,
+      memory: this.memory(agentId),
+      skills: this.skills(agentId),
+      sendWidget: () => ({}) as Message,
+      startBackground: (command: string, cwd: string, confined: boolean) => this.startBackground(agentId, command, cwd, confined),
+      awaitBackground: (id: string, timeoutMs: number) => this.awaitBackground(id, timeoutMs),
+    } as ToolContext;
+    return (await tool.run(ctx, args)).output;
+  }
+
   private async rememberExchange(agentId: string, userText: string) {
     const transcript = this.store.transcript(agentId);
     const reply = [...transcript].reverse().find((m) => m.role === 'agent' && m.text.trim().length > 0);
@@ -1193,6 +1242,14 @@ export function commandPrefixOf(command: string): string {
   const takesSecond = second && !second.startsWith('-') && !/[\\/:]/.test(second) && /^[\w.-]+$/.test(second);
   return (takesSecond ? `${head} ${second}` : head).toLowerCase();
 }
+
+/**
+ * Below this, a prompt cannot have carried Halo's instructions and its toolset.
+ *
+ * The system prompt is ~1500 tokens and the 34 tool schemas are a few thousand more, so a server
+ * that reports having read fewer than this truncated the request rather than answered it.
+ */
+const PROMPT_FLOOR_TOKENS = 4200;
 
 const MAX_CHANNEL_HOPS = 3;
 

@@ -143,6 +143,11 @@ docs/       teardown and internals of the original
 
 ## Under the hood
 
+- **The model needs a context window of at least ~8k.** The system prompt plus 34 tool schemas is
+  several thousand tokens, and a server with a smaller window silently truncates the request — the
+  model never sees its instructions, answers in plain text, and the turn ends with nothing sent.
+  Ollama's default is 4096, which is below that floor: start it with `OLLAMA_CONTEXT_LENGTH=16384`.
+  Halo says so in the transcript when it detects a truncated prompt.
 - Turns run as a tool loop against an OpenAI-compatible endpoint. Failures are classified rather than guessed at:
   a rate limit or a 5xx is retried, an expired key or a missing model is reported once and not retried, and a
   context overflow is compacted and tried again — the one class where a second attempt can actually differ.
