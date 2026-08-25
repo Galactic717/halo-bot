@@ -33,6 +33,28 @@ export function nextRun(routine: Pick<Routine, 'triggers'>, from = Date.now()): 
 
 const DEFAULT_MAX_RUNS_PER_DAY = 24;
 
+/**
+ * Consecutive failures before a routine is paused.
+ *
+ * A routine whose site moved or whose command no longer exists fails identically every time. Left
+ * alone it burns tokens on a schedule and fills the history with the same line, and nobody reads a
+ * history that is all the same line. Three is Hermes's default for the same reason.
+ */
+const FAILURE_STREAK_LIMIT = 3;
+
+/**
+ * Whether the app is in a state where firing a routine can possibly work.
+ *
+ * Checked before any model machinery is built, so a routine that fires while the model server is
+ * down is skipped and left due rather than burnt as a failure — the alternative spends the daily
+ * allowance and the failure streak on an outage that has nothing to do with the routine.
+ */
+export function preflight(settings: { provider: { model: string; baseUrl: string } }, providerHealthy: boolean | null): string | null {
+  if (!settings.provider.model.trim()) return 'no model is configured';
+  if (providerHealthy === false) return `the model server at ${settings.provider.baseUrl} is not answering`;
+  return null;
+}
+
 /** True when a routine has already fired its daily allowance. */
 export function isOverDailyCap(runs: RoutineRun[] | undefined, cap: number, now: number): boolean {
   const dayAgo = now - 86_400_000;
@@ -44,6 +66,9 @@ export class Scheduler {
   private store: Store;
   private runner: Runner;
   private emit: (event: HaloEvent) => void;
+  /** Set by main from the provider health check, so a tick can tell an outage from a bad routine. */
+  providerHealthy: boolean | null = null;
+  private warnedBlocked = new Set<string>();
 
   constructor(store: Store, runner: Runner, emit: (event: HaloEvent) => void) {
     this.store = store;
@@ -67,10 +92,24 @@ export class Scheduler {
   private tick() {
     const now = Date.now();
     let changed = false;
+    // Nothing can run right now: leave every routine due and say so once, rather than spending the
+    // daily allowance and the failure streak on an outage none of them caused.
+    const blocked = preflight(this.store.getSettings(), this.providerHealthy);
     for (const routine of this.store.listRoutines()) {
       if (!routine.enabled) continue;
       const due = routine.nextRunAt ?? nextRun(routine, routine.createdAt);
       if (due > now) continue;
+      if (blocked) {
+        if (!this.warnedBlocked.has(routine.id)) {
+          this.warnedBlocked.add(routine.id);
+          this.runner.systemEvent(routine.agentId, {
+            kind: 'routine',
+            label: `"${routine.name}" is waiting — ${blocked}`,
+          });
+        }
+        continue;
+      }
+      this.warnedBlocked.delete(routine.id);
       if (!this.store.getAgent(routine.agentId)) {
         this.store.deleteRoutine(routine.id);
         changed = true;
@@ -95,7 +134,12 @@ export class Scheduler {
         nextRunAt: nextRun(routine, now),
         runs: [...(routine.runs ?? []), { at: now, status: 'ok' as const, note: 'running' }].slice(-20),
       });
-      this.runner.submitSystemTurn(routine.agentId, routine.prompt, `Routine "${routine.name}"`, 'routine', (ok, note) =>
+      // A routine that reports the same thing every hour is noise; with continuity on it can see
+      // what it last said and stay quiet when nothing has moved.
+      const prompt = routine.continuity && routine.lastOutput
+        ? `${routine.prompt}\n\n[What you reported last time]\n${routine.lastOutput}\n\nIf nothing has changed since then, end the turn silently instead of repeating yourself.`
+        : routine.prompt;
+      this.runner.submitSystemTurn(routine.agentId, prompt, `Routine "${routine.name}"`, 'routine', (ok, note) =>
         this.finishRun(routine.id, now, ok, note),
       );
       changed = true;
@@ -110,7 +154,22 @@ export class Scheduler {
     const runs = (routine.runs ?? []).map((run) =>
       run.at === at ? { at, status: ok ? ('ok' as const) : ('error' as const), ...(note ? { note } : {}) } : run,
     );
-    this.store.saveRoutine({ ...routine, runs });
+    const streak = ok ? 0 : (routine.failureStreak ?? 0) + 1;
+    const exhausted = streak >= FAILURE_STREAK_LIMIT;
+    if (exhausted) {
+      this.runner.systemEvent(routine.agentId, {
+        kind: 'routine',
+        label: `Paused "${routine.name}" — it failed ${streak} times in a row`,
+        ...(note ? { chip: note.slice(0, 80) } : {}),
+      });
+    }
+    this.store.saveRoutine({
+      ...routine,
+      runs,
+      failureStreak: streak,
+      ...(exhausted ? { enabled: false } : {}),
+      ...(ok && routine.continuity && note ? { lastOutput: note.slice(0, 2000) } : {}),
+    });
     this.emit({ type: 'routines', routines: this.store.listRoutines() });
   }
 }

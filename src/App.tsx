@@ -41,6 +41,8 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [teaching, setTeaching] = useState<{ agentId: string; seconds: number; steps: number } | null>(null);
+  /** Who has the wheel on each bot's browser, and what it asked for when it handed over. */
+  const [control, setControl] = useState<Record<string, { holder: 'bot' | 'human'; requested: boolean; instruction?: string }>>({});
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
   /**
@@ -144,6 +146,16 @@ export function App() {
           break;
         case 'computer':
           setComputer({ agentId: event.agentId, url: event.url, title: event.title, visible: event.visible });
+          break;
+        case 'control':
+          setControl((cur) => ({
+            ...cur,
+            [event.agentId]: {
+              holder: event.holder,
+              requested: event.requested,
+              ...(event.instruction ? { instruction: event.instruction } : {}),
+            },
+          }));
           break;
         case 'teaching':
           setTeaching(event.recording ? { agentId: event.agentId, seconds: event.seconds, steps: event.steps } : null);
@@ -308,6 +320,10 @@ export function App() {
           state={computer}
           teaching={teaching && teaching.agentId === activeId ? teaching : null}
           onTeaching={setTeaching}
+          control={control[activeId!] ?? { holder: 'bot', requested: false }}
+          onControl={(next) =>
+            setControl((cur) => ({ ...cur, [activeId!]: { ...(cur[activeId!] ?? { holder: 'bot', requested: false }), ...next } }))
+          }
           onClose={() => void window.halo.computerHide()}
         />
       ) : (

@@ -38,11 +38,81 @@ export interface ChatResult {
   usage: { promptTokens: number; completionTokens: number };
 }
 
+/**
+ * Why a model call failed, as a code rather than a sentence.
+ *
+ * A caller has to branch on this — a rate limit is worth waiting out, an expired key never is, and
+ * a context overflow is fixed by compacting rather than by trying again — and branching on the text
+ * of somebody's error message is how that goes subtly wrong the next time a provider rewords one.
+ * The vocabulary and the precedence are Hermes's: auth wins over quota, because a real 401 body
+ * often mentions funds and must not be misread as a quota problem.
+ */
+export type FailureReason =
+  | 'provider_auth_or_access'
+  | 'provider_quota_limit'
+  | 'provider_rate_limit'
+  | 'provider_server_error'
+  | 'context_overflow'
+  | 'missing_config'
+  | 'model_unavailable'
+  | 'network'
+  | 'unknown';
+
+/** The reasons a retry can help with on its own, without changing anything first. */
+const TRANSIENT: ReadonlySet<FailureReason> = new Set(['provider_rate_limit', 'provider_server_error', 'network']);
+
+export function classifyProviderError(error: unknown): FailureReason {
+  const status = error instanceof ProviderError ? error.status : undefined;
+  const text = String((error as Error)?.message ?? error).toLowerCase();
+
+  if (status === 401 || status === 403 || /invalid api key|unauthor|forbidden|authentication/.test(text)) return 'provider_auth_or_access';
+  if (status === 402 || /out of funds|quota|insufficient|billing|credit balance/.test(text)) return 'provider_quota_limit';
+  if (status === 429 || /rate limit|too many requests/.test(text)) return 'provider_rate_limit';
+  if ((status !== undefined && status >= 500) || /server error|overloaded|bad gateway|service unavailable/.test(text)) {
+    return 'provider_server_error';
+  }
+  if (/context length|context_length|maximum context|too many tokens|prompt is too long/.test(text)) return 'context_overflow';
+  if (/no model|model not found|does not exist|unknown model/.test(text)) return 'model_unavailable';
+  if (/no api key|missing|not configured/.test(text)) return 'missing_config';
+  if (/econnreset|econnrefused|etimedout|epipe|fetch failed|socket hang up|network|stopped responding/.test(text)) return 'network';
+  return 'unknown';
+}
+
+export function isRetryable(reason: FailureReason): boolean {
+  return TRANSIENT.has(reason);
+}
+
+/** What to tell the user, per reason. Short, and it says what would fix it. */
+export function describeFailure(reason: FailureReason, message: string): string {
+  switch (reason) {
+    case 'provider_auth_or_access':
+      return 'The model server rejected the API key. Put a working one in Settings → Model.';
+    case 'provider_quota_limit':
+      return 'The model account is out of credit or over its quota.';
+    case 'provider_rate_limit':
+      return 'The model server is rate limiting this key; it kept refusing after retries.';
+    case 'provider_server_error':
+      return 'The model server is failing on its side and did not recover on retry.';
+    case 'context_overflow':
+      return 'The conversation outgrew the model context even after compacting.';
+    case 'model_unavailable':
+      return `That model is not available on this server: ${message}`;
+    case 'missing_config':
+      return 'The model is not configured. Pick one in Settings → Model.';
+    case 'network':
+      return 'The model server could not be reached.';
+    default:
+      return `Model request failed: ${message}`;
+  }
+}
+
 export class ProviderError extends Error {
   status?: number;
+  readonly reason: FailureReason;
   constructor(message: string, status?: number) {
     super(message);
     this.status = status;
+    this.reason = classifyProviderError(this);
   }
 }
 
@@ -66,10 +136,16 @@ const RETRY_DELAYS_MS = [800, 2500];
 /** A single model call that has produced nothing for this long is treated as hung. */
 const CALL_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * Whether trying the same call again could help.
+ *
+ * An expired key, a model that does not exist and a prompt that is too long all fail the same way
+ * three times in a row; retrying them costs the user a minute and tells them nothing. Only the
+ * genuinely transient classes are retried here — a context overflow is handled a level up, by
+ * compacting first, which is the one thing that actually changes the outcome.
+ */
 function isTransient(error: unknown): boolean {
-  if (error instanceof ProviderError) return error.status === undefined || error.status >= 500 || error.status === 429;
-  const message = String((error as Error)?.message ?? error);
-  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|fetch failed|socket hang up|network/i.test(message);
+  return isRetryable(classifyProviderError(error));
 }
 
 /**

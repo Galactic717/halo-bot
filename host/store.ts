@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   localExecution: 'ask',
   autoReview: true,
   autoReviewMode: 'smart',
+  policyMode: 'enforce',
   startAtLogin: false,
   onboarded: false,
   minimizeToTray: true,

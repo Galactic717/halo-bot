@@ -117,6 +117,10 @@ export interface ApprovalRequest {
   detail: string;
   reason: string;
   createdAt: number;
+  /** The command verbatim, when there is one. "Always allow" is scoped to how it starts. */
+  command?: string;
+  /** What the action does, so the card can say it and a remembered rule can name it. */
+  intent?: string;
 }
 
 export type ApprovalDecision = 'always' | 'once' | 'never';
@@ -148,12 +152,59 @@ export interface Routine {
   runs?: RoutineRun[];
   /** Safety valve: a misconfigured routine cannot fire more than this in a day. */
   maxRunsPerDay?: number;
+  /**
+   * Consecutive failures. A routine that has failed this many times in a row is paused rather than
+   * left to fail on a schedule for a week with nobody reading the history.
+   */
+  failureStreak?: number;
+  /**
+   * Feeds the routine its own last result on the next run.
+   *
+   * A watcher that cannot see what it said last time reports the same thing every hour. With this
+   * it can say "still down" once and then stay quiet. Borrowed from Hermes's cron continuity.
+   */
+  continuity?: boolean;
+  /** The last thing this routine reported, kept only when `continuity` is on. */
+  lastOutput?: string;
 }
 
 export interface AutoReviewRule {
   id: string;
   when: string;
   decision: 'allow' | 'ask' | 'deny';
+  /** Narrows the rule to one kind of action. Without it the rule is matched on its words alone. */
+  surface?: ApprovalSurface;
+  /** Narrows the rule to one effect: run_command, write_file, navigate, and so on. */
+  intent?: string;
+  /**
+   * Narrows the rule to commands beginning this way.
+   *
+   * This is what "Always allow" writes now. A rule that only said "run a command on your computer"
+   * matched every later command word for word, so one approval became standing permission to run
+   * anything; a prefix keeps the permission to the shape of command that was actually approved.
+   */
+  commandPrefix?: string;
+}
+
+/** One decided action, written before it runs. See host/audit.ts. */
+export interface AuditRow {
+  at: number;
+  agentId: string;
+  agentName: string;
+  tool: string;
+  surface: ApprovalSurface | 'plugin';
+  intent?: string;
+  summary: string;
+  detail: string;
+  outcome: 'allowed' | 'refused' | 'failed';
+  /** Where the verdict came from: hardline, rule, dangerous, granted, mode, review, base. */
+  source: string;
+  /** The rule or pattern that decided it, when one did. */
+  matched?: string;
+  /** Set only on a permitted action that then did not succeed. */
+  failure?: string;
+  /** Present when the decision was recorded but not enforced, because the policy is in dry-run. */
+  dryRun?: boolean;
 }
 
 export interface Settings {
@@ -181,6 +232,14 @@ export interface Settings {
   autoReview: boolean;
   /** rules: local rules only. smart: rules plus a model review of risky actions. */
   autoReviewMode: 'rules' | 'smart';
+  /**
+   * enforce blocks what the policy refuses. dry-run decides and records and lets the work continue.
+   *
+   * Dry-run is how somebody writes a rule against real work and reads the audit trail before it
+   * starts refusing things. A boundary nobody dares switch on is not a boundary. The hardline floor
+   * ignores this: it refuses in both modes.
+   */
+  policyMode: 'enforce' | 'dry-run';
   startAtLogin: boolean;
   onboarded: boolean;
   minimizeToTray: boolean;
@@ -236,4 +295,17 @@ export type HaloEvent =
   | { type: 'routines'; routines: Routine[] }
   | { type: 'settings'; settings: Settings }
   | { type: 'computer'; agentId: string; url: string; title: string; visible: boolean }
+  /** Who is driving the bot's browser, and why it asked. */
+  | { type: 'control'; agentId: string; holder: 'bot' | 'human'; requested: boolean; instruction?: string }
+  | { type: 'audit'; row: AuditRow }
   | { type: 'error'; agentId?: string; message: string };
+
+/** Who has the wheel on one bot's browser. */
+export interface ControlState {
+  holder: 'bot' | 'human';
+  since: number;
+  /** True once the bot has asked for help and nobody has taken the wheel yet. */
+  requested: boolean;
+  /** What the bot needs the person to do, shown on the takeover bar. */
+  instruction?: string;
+}

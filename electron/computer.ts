@@ -3,7 +3,36 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ComputerPort } from '../host/tools';
 import { describeTrace, drainRecorder, injectRecorder, parseRecordedLine, type TeachEvent } from './teach';
-import type { HaloEvent } from '../host/types';
+import type { ControlState, HaloEvent } from '../host/types';
+
+/**
+ * A refusal because a person is driving. Distinct from a failure, so the bot can be told to wait
+ * rather than to try something else.
+ */
+export class HumanHasControlError extends Error {
+  constructor() {
+    super('A person has the wheel on your browser right now. Wait for them to hand it back, and say so if the wait matters.');
+    this.name = 'HumanHasControlError';
+  }
+}
+
+/** A ref the model cited that is not on the page the browser is actually showing. */
+export class StaleRefError extends Error {
+  constructor(ref: string) {
+    super(`${ref} is not on the page this browser is showing. Take a fresh Browser snapshot and use the refs it returns.`);
+    this.name = 'StaleRefError';
+  }
+}
+
+/** An unanswered request for help stops being shown after this, rather than following the bot to tomorrow. */
+const HELP_REQUEST_TTL_MS = 10 * 60_000;
+
+interface SnapshotEntry {
+  /** Which snapshot these refs came from. A ref only resolves against its own generation. */
+  generation: number;
+  url: string;
+  elements: Map<string, { ref: string; role: string; name: string; selector: string }>;
+}
 
 const HOME = 'https://duckduckgo.com';
 /** Parked position: large enough to render a real page, far enough out to be invisible. */
@@ -39,6 +68,11 @@ export class Computer implements ComputerPort {
   private suspended = false;
   private resumeState: { kind: 'full' | 'preview'; agentId: string; bounds: Rectangle } | null = null;
   private teaching: { agentId: string; startedAt: number; events: TeachEvent[]; timer: NodeJS.Timeout } | null = null;
+  /** Who is driving each bot's browser. Absent means the bot has it, which is the normal case. */
+  private control = new Map<string, ControlState>();
+  /** The elements the last snapshot named, per bot, so a ref is resolved here and not by the model. */
+  private snapshots = new Map<string, SnapshotEntry>();
+  private generation = 0;
 
   constructor(
     private window: BaseWindow,
@@ -255,11 +289,145 @@ export class Computer implements ComputerPort {
   /** Brings the screen up for the user so they can sign in or take over. */
   async handOver(agentId: string, instruction: string): Promise<void> {
     await this.ensure(agentId);
+    this.setControl(agentId, { holder: 'bot', since: Date.now(), requested: true, instruction });
     this.onHandOver?.(agentId, instruction);
   }
 
   /** Set by main so a handover can open the pane in the renderer. */
   onHandOver?: (agentId: string, instruction: string) => void;
+
+  // ----------------------------------------------------------------- control
+
+  /**
+   * Who has the wheel.
+   *
+   * One browser has at most one driver. A bot that meets a login wall asks for help; the person
+   * takes control, does the part only they can do, and hands it back. While they hold it every
+   * acting call from the bot is refused, because two drivers on one page is how a bot presses
+   * Confirm on a form somebody was still filling in. Modelled on OpenBot's control state, which
+   * lives beside the browser for the same reason this does: a takeover the browser does not know
+   * about is not a takeover.
+   */
+  controlOf(agentId: string): ControlState {
+    const state = this.control.get(agentId);
+    if (!state) return { holder: 'bot', since: 0, requested: false };
+    // An unanswered request belongs to a run that has long since ended; stop showing it.
+    if (state.holder === 'bot' && state.requested && Date.now() - state.since > HELP_REQUEST_TTL_MS) {
+      const cleared: ControlState = { holder: 'bot', since: Date.now(), requested: false };
+      this.control.set(agentId, cleared);
+      return cleared;
+    }
+    return state;
+  }
+
+  private setControl(agentId: string, state: ControlState) {
+    this.control.set(agentId, state);
+    this.emit({
+      type: 'control',
+      agentId,
+      holder: state.holder,
+      requested: state.requested,
+      ...(state.instruction ? { instruction: state.instruction } : {}),
+    });
+  }
+
+  /** The person takes the wheel. Every bot action on this browser is refused until they give it back. */
+  takeControl(agentId: string) {
+    const prior = this.control.get(agentId);
+    this.setControl(agentId, {
+      holder: 'human',
+      since: Date.now(),
+      requested: false,
+      ...(prior?.instruction ? { instruction: prior.instruction } : {}),
+    });
+  }
+
+  releaseControl(agentId: string) {
+    this.setControl(agentId, { holder: 'bot', since: Date.now(), requested: false });
+    // The page almost certainly moved while they were driving, so nothing the bot is still holding
+    // describes it any more.
+    this.snapshots.delete(agentId);
+  }
+
+  /** Throws when a person is driving. Called by every acting path, never by a read. */
+  private assertBotHasControl(agentId: string) {
+    if (this.controlOf(agentId).holder === 'human') throw new HumanHasControlError();
+  }
+
+  // ---------------------------------------------------------------- snapshot
+
+  /**
+   * The controls on the page, each with an opaque ref.
+   *
+   * A ref, not a selector the model made up. The mapping is held here, so an action names something
+   * this process resolved from a page it actually looked at: "click e12" cannot become a click on
+   * whatever the model wished were there. It also makes the approval card able to say what is being
+   * pressed, which a raw CSS selector never could. The generation counter means a ref from a
+   * superseded page resolves to nothing rather than to whatever now holds that ref.
+   */
+  async snapshot(agentId: string): Promise<string> {
+    const wc = this.screen(agentId).view.webContents;
+    const script = `(() => {
+      const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+      const roleOf = (el) => {
+        const explicit = el.getAttribute('role');
+        if (explicit) return explicit;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'a') return 'link';
+        if (tag === 'button') return 'button';
+        if (tag === 'select') return 'combobox';
+        if (tag === 'textarea') return 'textbox';
+        if (tag === 'input') {
+          const t = (el.getAttribute('type') || 'text').toLowerCase();
+          if (t === 'checkbox' || t === 'radio') return t;
+          if (t === 'submit' || t === 'button') return 'button';
+          return 'textbox';
+        }
+        return tag;
+      };
+      const out = [];
+      const nodes = document.querySelectorAll('a[href], button, input, textarea, select, [role=button], [role=link], [role=tab], [role=menuitem]');
+      let n = 0;
+      for (const el of nodes) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        const name = clean(el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.name || '');
+        if (!name) continue;
+        n += 1;
+        el.setAttribute('data-halo-ref', 'e' + n);
+        out.push({ ref: 'e' + n, role: roleOf(el), name: name.slice(0, 80), selector: '[data-halo-ref="e' + n + '"]' });
+        if (out.length >= 120) break;
+      }
+      return JSON.stringify({ url: location.href, title: document.title, elements: out });
+    })()`;
+    const raw = (await wc.executeJavaScript(script, true)) as string;
+    const page = JSON.parse(raw) as {
+      url: string;
+      title: string;
+      elements: { ref: string; role: string; name: string; selector: string }[];
+    };
+    this.generation += 1;
+    this.snapshots.set(agentId, {
+      generation: this.generation,
+      url: page.url,
+      elements: new Map(page.elements.map((e) => [e.ref, e])),
+    });
+    const listed = page.elements.map((e) => `${e.ref}  ${e.role}  "${e.name}"`).join('\n');
+    return `# ${page.title}\n${page.url}\nsnapshot ${this.generation}\n\n${listed || '(no controls found)'}`;
+  }
+
+  /**
+   * What a ref points at, or undefined.
+   *
+   * Undefined rather than a throw, because the approval gate still has to run on an action whose
+   * element could not be identified: a rule written about a page the bot has not snapshotted should
+   * still be able to refuse it.
+   */
+  describeRef(agentId: string, ref: string): { role: string; name: string } | undefined {
+    const entry = this.snapshots.get(agentId);
+    const element = entry?.elements.get(ref);
+    return element ? { role: element.role, name: element.name } : undefined;
+  }
 
   // ---------------------------------------------------------------- teaching
 
@@ -312,6 +480,9 @@ export class Computer implements ComputerPort {
   }
 
   async navigate(agentId: string, url: string) {
+    this.assertBotHasControl(agentId);
+    // The page is about to change, so the refs the bot is holding describe something that is gone.
+    this.snapshots.delete(agentId);
     const s = this.screen(agentId);
     const target = /^https?:\/\//i.test(url) ? url : `https://${url}`;
     try {
@@ -358,9 +529,25 @@ export class Computer implements ComputerPort {
   }
 
   async act(agentId: string, action: string, params: Record<string, unknown>): Promise<string> {
+    this.assertBotHasControl(agentId);
     const wc = this.screen(agentId).view.webContents;
-    const selector = typeof params.selector === 'string' ? params.selector : '';
     const text = typeof params.text === 'string' ? params.text : '';
+    const ref = typeof params.ref === 'string' ? params.ref.trim() : '';
+    /*
+     * A cited ref resolves here or the action is refused.
+     *
+     * Falling back to the raw text when a ref does not resolve is the failure mode this whole
+     * mechanism exists to prevent: the approval card would have named the button from the snapshot,
+     * and the click would land on whatever that ref points at now. A stale citation is a reason to
+     * take a fresh snapshot, not to guess.
+     */
+    let selector = typeof params.selector === 'string' ? params.selector : '';
+    if (ref) {
+      const entry = this.snapshots.get(agentId);
+      const element = entry?.elements.get(ref);
+      if (!element) throw new StaleRefError(ref);
+      selector = element.selector;
+    }
 
     if (action === 'back') {
       if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();

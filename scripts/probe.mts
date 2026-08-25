@@ -13,6 +13,8 @@ const stubComputer: ComputerPort = {
   async act() { return 'stub'; },
   async readPage() { return 'stub page'; },
   async screenshot() { return 'stub.png'; },
+  async snapshot() { return 'stub snapshot'; },
+  describeRef() { return undefined; },
 };
 
 const root = mkdtempSync(join(tmpdir(), 'halo-e2e-'));

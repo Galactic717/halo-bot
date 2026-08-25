@@ -31,9 +31,11 @@ export function subagentSystemPrompt(kind: SubagentKind, parentName: string): st
   if (kind === 'browser') {
     return `${shared}
 
-You drive a real browser with the Browser tool: navigate, read, click, type, press, scroll, back, screenshot.
-Read the page before clicking so you act on what is actually there. If a step needs a human (a password,
-2FA, a captcha, a payment), stop and report exactly which step is blocked — the bot will hand the user the screen.`;
+You drive a real browser with the Browser tool: navigate, read, snapshot, click, type, press, scroll, back, screenshot.
+Snapshot the page before you click or type, and act by the refs it gives you: that is what makes the action land on
+the control you actually saw rather than on whatever a guessed selector happens to match. If a step needs a human (a
+password, 2FA, a captcha, a payment), stop and report exactly which step is blocked — the bot will hand the user the
+screen. If the browser tells you a person has the wheel, stop and report that too.`;
   }
 
   if (kind === 'research') {

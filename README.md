@@ -5,7 +5,9 @@ AI teammates you can give real work to — running entirely on your own Windows 
 A local clone of the Grok Bot model of working: named bots with persistent memory, their own workspace and browser,
 routines on a schedule, skills they learn by watching you, and an approval gate before anything touches your machine.
 The teardown that this is built from lives in [docs/GROK_BOT_TEARDOWN.md](docs/GROK_BOT_TEARDOWN.md) and
-[docs/GROK_BOT_INTERNALS.md](docs/GROK_BOT_INTERNALS.md).
+[docs/GROK_BOT_INTERNALS.md](docs/GROK_BOT_INTERNALS.md). The approval floor, the audit trail, the browser
+snapshot and the retry policy come from two later teardowns — CopilotKit's OpenBot and Nous Research's Hermes
+Agent — written up in [docs/OPENBOT_HERMES_TEARDOWN.md](docs/OPENBOT_HERMES_TEARDOWN.md).
 
 ## Install
 
@@ -55,7 +57,10 @@ want your bots to look at screenshots.
   are confined to the box, and a `Shell` command that names a path outside it raises the approval bar — but a
   determined model could still reach past that. Give a bot you do not trust `Never` under its own permissions.
 - **Its own browser** — a real Chromium screen you can watch live in the details pane and take over with one click.
-  Logins persist, so signing in once is enough.
+  Logins persist, so signing in once is enough. The bot works from a **snapshot**: it lists the page's controls with
+  a ref each, and clicks by ref, so an action lands on the control Halo actually saw rather than on a selector the
+  model invented. **One browser has one driver** — while you hold the wheel, the bot's actions there are refused
+  rather than queued.
 - **Your computer** — `ExternalShell`, `ExternalRead`, `CopyToBox`, `CopyFromBox`, each behind the approval gate.
 - **The web** — `WebSearch`, `WebFetch`.
 - **Background workers** — `Task` hands a tightly-scoped job to a browser, research or shell worker that reports back.
@@ -64,6 +69,8 @@ want your bots to look at screenshots.
   loaded into every turn.
 - **Skills** — reusable recipes, either written with `SaveSkill` or learned by watching you (see below).
 - **Routines** — interval, daily, weekdays or weekly triggers, several per routine, with a test run and run history.
+  A routine waits out a model-server outage rather than spending its daily allowance on one, pauses itself after
+  three failures in a row, and can be fed its own last report so a watcher says "still down" once instead of hourly.
 - **Plugins** — a marketplace of real MCP servers. Installed tools appear to every bot as `mcp__<server>__<tool>`.
 
 ## Teach a task
@@ -83,9 +90,20 @@ A bot's Settings pane carries its own rules, so a research bot and a file bot do
 
 ## Staying in control
 
-- Anything that touches your machine or the outside world raises an approval bar above the composer:
-  **Always allow / Allow once / Never**. "Always" and "Never" are remembered as rules.
+- **A floor nothing can lower.** Wiping a drive, deleting your backups or shadow copies, formatting a volume,
+  rewriting the boot configuration: refused outright, with approvals off, with execution set to Allow, with the
+  folder granted, with a rule that says allow. These are not a policy anybody tunes.
+- Everything else raises an approval bar above the composer: **Always allow / Allow once / Never**.
+  "Always" and "Never" are remembered as rules — **scoped to the action**, so approving `git status` grants
+  commands starting `git status`, not a shell.
 - **Smart review** (Settings → General) additionally asks the model to judge anything the rules would wave through.
+  The command reaches that reviewer with its comments stripped and inside a fence, and your rules reach it on the
+  trusted channel, so a comment in the command cannot argue its own way past the check.
+- **Dry run** (Settings → General) decides and records without blocking, so you can watch a new rule work before it
+  starts refusing things. The floor still refuses.
+- **Activity** (Settings → Activity) is the trail: every gated action, allowed, refused or failed, with the rule
+  that decided it. The row is written *before* the action runs, so nothing acts without appearing there.
+  Anything that looks like a key is masked before it reaches disk.
 - Rules are plain language: "when a bot wants to *read files from my Downloads folder* → allow automatically".
 - Closing the window keeps the bots running in the tray; quit from the tray to stop everything.
 
@@ -125,12 +143,15 @@ docs/       teardown and internals of the original
 
 ## Under the hood
 
-- Turns run as a tool loop against an OpenAI-compatible endpoint, retried on transient failures and cut off if the
-  server goes quiet.
+- Turns run as a tool loop against an OpenAI-compatible endpoint. Failures are classified rather than guessed at:
+  a rate limit or a 5xx is retried, an expired key or a missing model is reported once and not retried, and a
+  context overflow is compacted and tried again — the one class where a second attempt can actually differ.
 - Long chats fold their older turns into a summary once they pass the context budget, so a bot can run for weeks.
 - Memory extraction, safety review and summarising all use the helper model, keeping the main model free for work.
 - Everything is files: `%APPDATA%/Halo Bot` holds `settings.json`, `channels.json`, `routines.json`, `usage.jsonl`,
-  and one folder per bot with its transcript, model history, memory, skills and box.
+  `audit.jsonl`, and one folder per bot with its transcript, model history, memory, skills and box.
+- A shell command sees an allow-list of environment variables — PATH, locale, proxy — and not this process's
+  environment, so `Get-ChildItem env:` cannot print what the app decrypted at boot.
 
 Tests: `npm test` (node's runner, no framework). Needs Node 22.6+, which runs TypeScript directly.
 

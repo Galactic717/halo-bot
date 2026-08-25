@@ -4,9 +4,10 @@ import { extname } from 'node:path';
 import { MemoryStore, extractMemories } from './memory.ts';
 import { SkillStore } from './skills.ts';
 import { runShell } from './tools.ts';
-import { chat, ProviderError, type ChatMessage, type ToolSchema } from './provider.ts';
+import { chat, classifyProviderError, describeFailure, ProviderError, type ChatMessage, type ToolSchema } from './provider.ts';
 import { buildSystemPrompt, REPLY_REMINDER } from './prompt.ts';
-import { decide, reviewWithModel, summarize } from './policy.ts';
+import { decideDetailed, reviewWithModel, summarize, type Verdict } from './policy.ts';
+import { AuditLog } from './audit.ts';
 import { TOOLS, TOOLS_BY_NAME, describeTriggers, type ComputerPort, type RunnerPort, type Tool, type ToolContext } from './tools.ts';
 import type { SubagentKind, SubagentRun } from './subagents.ts';
 import { mentionedNames } from './mentions.ts';
@@ -14,7 +15,7 @@ import { compactHistory, estimateTokens } from './compaction.ts';
 import type { McpManager } from './mcp.ts';
 import { SUBAGENT_TOOLS, subagentSystemPrompt } from './subagents.ts';
 import type { Store } from './store.ts';
-import type { Agent, ApprovalDecision, ApprovalRequest, Channel, HaloEvent, Message, SystemEvent, ToolCallRecord, Widget } from './types.ts';
+import type { Agent, ApprovalDecision, ApprovalRequest, AuditRow, Channel, HaloEvent, Message, SystemEvent, ToolCallRecord, Widget } from './types.ts';
 
 const HISTORY_LIMIT = 80;
 
@@ -44,6 +45,7 @@ export class Runner implements RunnerPort {
   private emitEvent: (event: HaloEvent) => void;
   private notify?: (agent: Agent, message: Message) => void;
   private mcp?: McpManager;
+  readonly audit: AuditLog;
 
   private queues = new Map<string, QueueItem[]>();
   private running = new Set<string>();
@@ -65,6 +67,42 @@ export class Runner implements RunnerPort {
     this.emitEvent = opts.emit;
     this.notify = opts.notify;
     this.mcp = opts.mcp;
+    this.audit = new AuditLog(opts.store.root);
+  }
+
+  /**
+   * One row on the trail. Written before the action runs, never after it succeeded.
+   *
+   * An action that was not recorded did not happen, because there is no path that acts without
+   * writing the row first. A permitted action that then fails gets its own row rather than an edit
+   * to this one: "allowed" and "happened" are different facts, and a reader takes the first for the
+   * second unless the trail says otherwise.
+   */
+  private record(
+    agentId: string,
+    tool: string,
+    surface: AuditRow['surface'],
+    action: { summary: string; detail: string; intent?: string },
+    outcome: AuditRow['outcome'],
+    verdict?: { source: string; matched?: string | null },
+    extra: { failure?: string; dryRun?: boolean } = {},
+  ) {
+    const row = this.audit.write({
+      at: Date.now(),
+      agentId,
+      agentName: this.store.getAgent(agentId)?.name ?? 'a deleted bot',
+      tool,
+      surface,
+      ...(action.intent ? { intent: action.intent } : {}),
+      summary: action.summary,
+      detail: action.detail,
+      outcome,
+      source: verdict?.source ?? 'none',
+      ...(verdict?.matched ? { matched: verdict.matched } : {}),
+      ...(extra.failure ? { failure: extra.failure } : {}),
+      ...(extra.dryRun ? { dryRun: true } : {}),
+    });
+    this.emitEvent({ type: 'audit', row });
   }
 
   // ---------------------------------------------------------------- public API
@@ -185,23 +223,35 @@ export class Runner implements RunnerPort {
     const pending = this.approvals.get(id);
     if (!pending) return;
     this.approvals.delete(id);
-    const { surface, summary } = pending.request;
-    if (decision === 'always' || decision === 'never') this.rememberDecision(surface, summary, decision);
+    if (decision === 'always' || decision === 'never') this.rememberDecision(pending.request, decision);
     pending.resolve(decision);
     this.emitEvent({ type: 'approval.resolved', id, approved: decision !== 'never' });
   }
 
   /**
-   * "Always allow" and "Never" are sticky, the way the original writes them into settings.
-   * They become a rule about *this* action. Flipping the global execution switch instead would turn
-   * one approval to read a file into standing permission to run any command.
+   * "Always allow" and "Never" are sticky, and scoped to the action that was in front of the user.
+   *
+   * The old version wrote a rule from the approval line alone, and every ExternalShell approval
+   * carried the same line — "Run a command on your computer" — so one "Always allow" matched every
+   * later command word for word and became standing permission to run anything on the machine. The
+   * rule now carries the surface, the intent, and for a shell the first words of the command, so
+   * approving `git status` grants `git`, not the shell.
    */
-  private rememberDecision(_surface: ApprovalRequest['surface'], summary: string, decision: ApprovalDecision) {
+  private rememberDecision(request: ApprovalRequest, decision: ApprovalDecision) {
     const settings = this.store.getSettings();
-    if (settings.rules.some((r) => r.when === summary)) return;
-    this.store.saveSettings({
-      rules: [...settings.rules, { id: randomUUID(), when: summary, decision: decision === 'always' ? 'allow' : 'deny' }],
-    });
+    const rule = {
+      id: randomUUID(),
+      when: request.summary,
+      decision: decision === 'always' ? ('allow' as const) : ('deny' as const),
+      surface: request.surface,
+      ...(request.intent ? { intent: request.intent } : {}),
+      ...(request.command ? { commandPrefix: commandPrefixOf(request.command) } : {}),
+    };
+    const already = settings.rules.some(
+      (r) => r.surface === rule.surface && r.commandPrefix === rule.commandPrefix && (r.commandPrefix ? true : r.when === rule.when),
+    );
+    if (already) return;
+    this.store.saveSettings({ rules: [...settings.rules, rule] });
     this.emitEvent({ type: 'settings', settings: this.store.getSettings() });
   }
 
@@ -523,18 +573,28 @@ export class Runner implements RunnerPort {
   }
 
   /** Folds old turns into a summary so a long-running bot never outgrows its context. */
-  private async compactIfNeeded(historyId: string, historySuffix: string | undefined, agentId: string, signal?: AbortSignal) {
+  private async compactIfNeeded(
+    historyId: string,
+    historySuffix: string | undefined,
+    agentId: string,
+    signal?: AbortSignal,
+    /** Set when the model has already said the context is too long, so the budget is not the judge. */
+    forced = false,
+  ) {
     const settings = this.store.getSettings();
     const raw = this.store.llmHistory(historyId, historySuffix) as unknown as ChatMessage[];
     if (raw.length < 12) return;
-    if (estimateTokens(raw) <= settings.provider.contextBudget) return;
+    if (!forced && estimateTokens(raw) <= settings.provider.contextBudget) return;
 
     const provider = settings.provider.helperModel
       ? { ...settings.provider, model: settings.provider.helperModel }
       : settings.provider;
     const result = await compactHistory(provider, raw, {
-      tokenBudget: settings.provider.contextBudget,
-      keepLast: 12,
+      // Forced means the model itself refused the length, so the configured budget was wrong for
+      // this model. Aim well under it rather than at it, or the retry overflows again.
+      tokenBudget: forced ? Math.floor(settings.provider.contextBudget / 2) : settings.provider.contextBudget,
+      keepLast: forced ? 6 : 12,
+      forced,
       ...(signal ? { signal } : {}),
     });
     if (!result.compacted) return;
@@ -637,6 +697,10 @@ export class Runner implements RunnerPort {
 
     let deliveredSomething = false;
     let widgetSent = false;
+    /** One compaction per turn: a second overflow means the tail alone does not fit, and looping would not help. */
+    let compactedForOverflow = false;
+    /** What the bot actually told the user, so a routine can be fed its own last report. */
+    let lastDelivered = '';
     const sentTexts = new Set<string>();
     const ctx: ToolContext = {
       agentId,
@@ -650,6 +714,7 @@ export class Runner implements RunnerPort {
           return { id: 'duplicate', agentId: target, role: 'agent', text, createdAt: Date.now() } as Message;
         }
         if (key) sentTexts.add(key);
+        lastDelivered = text;
         const msg = this.store.appendMessage({
           id: randomUUID(),
           agentId: target,
@@ -710,17 +775,36 @@ export class Runner implements RunnerPort {
         let streamed = '';
         const startedAt = Date.now();
         const providerForAgent = agent.model ? { ...settings.provider, model: agent.model } : settings.provider;
-        const result = await chat(
-          providerForAgent,
-          messages,
-          this.toolSchemas(),
-          (chunk) => {
-            streamed += chunk;
-            const a = ensureActivity();
-            this.emitEvent({ type: 'message.patch', agentId, messageId: a.id, text: streamed });
-          },
-          abort.signal,
-        );
+        const stream = (chunk: string) => {
+          streamed += chunk;
+          const a = ensureActivity();
+          this.emitEvent({ type: 'message.patch', agentId, messageId: a.id, text: streamed });
+        };
+
+        let result;
+        try {
+          result = await chat(providerForAgent, messages, this.toolSchemas(), stream, abort.signal);
+        } catch (error) {
+          /*
+           * The one failure worth a second attempt after changing something.
+           *
+           * A context overflow is not transient — the same call fails the same way forever — but it
+           * has exactly one fix, and the app already has it. Compact, then try once more, on the
+           * same conversation rather than a fresh one, so nothing the bot knows is thrown away to
+           * recover from being verbose. Every other class falls straight through: an expired key is
+           * not going to work on the third try. This is Hermes's retry policy for bot turns.
+           */
+          if (classifyProviderError(error) !== 'context_overflow' || compactedForOverflow) throw error;
+          compactedForOverflow = true;
+          this.systemEvent(agentId, { kind: 'note', label: 'Ran out of context — folding older turns into a summary and trying again' });
+          await this.compactIfNeeded(historyId, historySuffix, agentId, abort.signal, true);
+          const retried: ChatMessage[] = withReplyReminder([
+            { role: 'system', content: this.systemPrompt(agent, channelId) },
+            ...this.history(historyId, historySuffix),
+          ]);
+          streamed = '';
+          result = await chat(providerForAgent, retried, this.toolSchemas(), stream, abort.signal);
+        }
 
         this.store.recordUsage({
           at: Date.now(),
@@ -799,15 +883,15 @@ export class Runner implements RunnerPort {
 
       void this.rememberExchange(agentId, userText);
       if (abort.signal.aborted) return { ok: false, note: 'stopped' };
-      return { ok: true };
+      return { ok: true, ...(lastDelivered ? { note: lastDelivered } : {}) };
     } catch (error) {
-      const text =
-        error instanceof ProviderError
-          ? `Model request failed: ${error.message}. Check Settings → Model.`
-          : `Turn failed: ${String((error as Error)?.message ?? error)}`;
+      const message = String((error as Error)?.message ?? error);
+      const reason = error instanceof ProviderError ? error.reason : classifyProviderError(error);
+      const text = error instanceof ProviderError ? describeFailure(reason, message) : `Turn failed: ${message}`;
       this.emitEvent({ type: 'error', agentId, message: text });
       ctx.sendMessage(text);
-      return { ok: false, note: text.slice(0, 120) };
+      // The note is what a routine's run history shows, so it carries the code a person can act on.
+      return { ok: false, note: `[${reason}] ${text}`.slice(0, 160) };
     }
   }
 
@@ -826,26 +910,50 @@ export class Runner implements RunnerPort {
 
     const settings = this.store.getSettings();
     const action = summarize(tool.schema.name, args, this.store.boxDir(agentId));
-    let verdict = decide(settings, tool.surface, action, this.store.getAgent(agentId));
+    // A click names a ref; the card and the trail should say what that ref is, resolved from the
+    // page this process looked at rather than from whatever the model called it.
+    if (tool.schema.name === 'Browser' && typeof args.ref === 'string') {
+      const element = this.computer.describeRef(agentId, args.ref);
+      if (element) action.summary = `${action.summary} — ${element.role} "${element.name}"`;
+    }
+    let verdict: Verdict = decideDetailed(settings, tool.surface, action, this.store.getAgent(agentId));
 
     // Smart mode asks the model about anything the local rules would wave through.
-    if (verdict === 'allow' && settings.autoReview && settings.autoReviewMode === 'smart' && REVIEWED_SURFACES.has(tool.surface)) {
+    if (
+      verdict.decision === 'allow' &&
+      verdict.source !== 'granted' &&
+      settings.autoReview &&
+      settings.autoReviewMode === 'smart' &&
+      REVIEWED_SURFACES.has(tool.surface)
+    ) {
       const review = await reviewWithModel(settings, tool.surface, action, signal);
       if (review.decision !== 'allow') {
-        verdict = review.decision;
+        verdict = { decision: review.decision, source: 'review', matched: null, reason: review.reason };
         onNote?.(`Safety review: ${review.decision} — ${review.reason}`);
       }
     }
 
-    if (verdict === 'deny') {
+    /*
+     * Dry-run decides and records without blocking, so somebody can write a rule against real work
+     * and read the trail before it starts refusing things. The hardline floor ignores it: those are
+     * not a policy anybody is tuning.
+     */
+    const dryRun = settings.policyMode === 'dry-run' && verdict.source !== 'hardline';
+    if (verdict.decision !== 'allow' && dryRun) {
+      this.record(agentId, tool.schema.name, tool.surface, action, 'allowed', verdict, { dryRun: true });
+      return { allowed: true };
+    }
+
+    if (verdict.decision === 'deny') {
+      this.record(agentId, tool.schema.name, tool.surface, action, 'refused', verdict);
       return {
         allowed: false,
-        error: 'blocked by settings',
-        output: 'Blocked by the user settings. Tell the user what you wanted to do and why.',
+        error: verdict.source === 'hardline' ? 'blocked by Halo' : 'blocked by settings',
+        output: `${verdict.reason} Tell the user what you wanted to do and why, and do not look for another way round this.`,
       };
     }
 
-    if (verdict === 'ask') {
+    if (verdict.decision === 'ask') {
       // A background worker can ask while its parent sits idle, so the old status is put back.
       const prior = this.store.getAgent(agentId)?.status ?? 'idle';
       this.setStatus(agentId, 'waiting', action.summary);
@@ -854,10 +962,13 @@ export class Runner implements RunnerPort {
         surface: tool.surface,
         summary: action.summary,
         detail: action.detail,
-        reason: 'This action affects your machine or the outside world.',
+        reason: verdict.reason,
+        ...(action.command ? { command: action.command } : {}),
+        ...(action.intent ? { intent: action.intent } : {}),
       });
       this.setStatus(agentId, prior);
       if (decision === 'never') {
+        this.record(agentId, tool.schema.name, tool.surface, action, 'refused', { source: 'user', matched: 'declined' });
         return {
           allowed: false,
           error: 'user declined',
@@ -867,11 +978,16 @@ export class Runner implements RunnerPort {
       if (decision === 'always') {
         this.systemEvent(agentId, {
           kind: 'permission',
-          label: `${this.store.getAgent(agentId)?.name ?? 'This bot'} can ${permissionPhrase(tool.surface)}.`,
+          label: `${this.store.getAgent(agentId)?.name ?? 'This bot'} can ${permissionPhrase(tool.surface)}${
+            action.command ? ` starting "${commandPrefixOf(action.command)}"` : ''
+          }.`,
         });
       }
+      this.record(agentId, tool.schema.name, tool.surface, action, 'allowed', { source: 'user', matched: decision });
+      return { allowed: true };
     }
 
+    this.record(agentId, tool.schema.name, tool.surface, action, 'allowed', verdict);
     return { allowed: true };
   }
 
@@ -901,12 +1017,17 @@ export class Runner implements RunnerPort {
 
     if (!tool) {
       if (this.mcp?.isPluginTool(call.name)) {
+        // A plugin reaches somebody else's service with the user's credentials, so it belongs on the
+        // trail beside everything else even though there is no local policy to decide it against.
+        const plugin = { summary: `Plugin call ${call.name}`, detail: JSON.stringify(redactArgs(call.args)).slice(0, 800), intent: 'plugin_call' };
+        this.record(ctx.agentId, call.name, 'plugin', plugin, 'allowed', { source: 'plugin' });
         try {
           const output = await this.mcp.call(call.name, call.args);
           attach({ status: 'done', endedAt: Date.now(), result: output.slice(0, 4000) });
           return { output };
         } catch (error) {
           const message = String((error as Error)?.message ?? error);
+          this.record(ctx.agentId, call.name, 'plugin', plugin, 'failed', { source: 'plugin' }, { failure: message });
           attach({ status: 'error', endedAt: Date.now(), error: message });
           return { output: `Plugin call failed: ${message}` };
         }
@@ -927,6 +1048,12 @@ export class Runner implements RunnerPort {
       return res.imagePath ? { output: res.output, imagePath: res.imagePath } : { output: res.output };
     } catch (error) {
       const message = String((error as Error)?.message ?? error);
+      // A permitted action that did not happen gets its own row. Without it the trail lies by
+      // omission: the decision row says "allowed", and a reader takes that to mean it ran.
+      if (tool.surface) {
+        const action = summarize(tool.schema.name, call.args, this.store.boxDir(ctx.agentId));
+        this.record(ctx.agentId, call.name, tool.surface, action, 'failed', { source: 'attempt' }, { failure: message });
+      }
       attach({ status: 'error', endedAt: Date.now(), error: message });
       return { output: `Tool failed: ${message}` };
     }
@@ -991,6 +1118,22 @@ function permissionPhrase(surface: ApprovalRequest['surface']): string {
   }
 }
 
+/**
+ * How much of a command a remembered "Always allow" covers.
+ *
+ * The executable and its first subcommand: `git push` rather than `git`, so approving a push does
+ * not also approve `git config --global`; and `git` alone when there is no subcommand. Long enough
+ * to be a decision about something, short enough that the rule is still useful the second time.
+ */
+export function commandPrefixOf(command: string): string {
+  const words = command.trim().split(/\s+/).filter(Boolean);
+  const head = words[0] ?? '';
+  const second = words[1] ?? '';
+  // A flag or a path is not a subcommand; those change every run and would make the rule fire once.
+  const takesSecond = second && !second.startsWith('-') && !/[\\/:]/.test(second) && /^[\w.-]+$/.test(second);
+  return (takesSecond ? `${head} ${second}` : head).toLowerCase();
+}
+
 const MAX_CHANNEL_HOPS = 3;
 
 /** Surfaces worth a model review; reading a page or listing files is not one of them. */
@@ -1019,6 +1162,15 @@ function withReplyReminder(messages: ChatMessage[]): ChatMessage[] {
     return patched;
   }
   return messages;
+}
+
+/** Plugin arguments go on the trail, so anything shaped like a credential is dropped first. */
+function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    out[key] = /token|secret|password|key|auth/i.test(key) ? '[withheld]' : value;
+  }
+  return out;
 }
 
 const IMAGE_TYPES: Record<string, string> = {

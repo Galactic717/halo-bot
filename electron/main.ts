@@ -187,6 +187,7 @@ async function checkProvider(force = false) {
   if (!provider.model.trim()) {
     if (force || providerHealthy !== false) {
       providerHealthy = false;
+      if (scheduler) scheduler.providerHealthy = false;
       emit({
         type: 'provider',
         ok: false,
@@ -205,6 +206,7 @@ async function checkProvider(force = false) {
     // A model without tool support cannot drive anything, so say so instead of failing every turn.
     if (chosen?.capabilities && chosen.capabilities.length > 0 && !chosen.capabilities.includes('tools')) {
       providerHealthy = false;
+      if (scheduler) scheduler.providerHealthy = false;
       emit({
         type: 'provider',
         ok: false,
@@ -216,6 +218,7 @@ async function checkProvider(force = false) {
       return;
     }
     const ok = models.length > 0;
+    if (scheduler) scheduler.providerHealthy = ok;
     if (force || providerHealthy !== ok) {
       providerHealthy = ok;
       emit({
@@ -229,6 +232,7 @@ async function checkProvider(force = false) {
   } catch (error) {
     if (force || providerHealthy !== false) {
       providerHealthy = false;
+      if (scheduler) scheduler.providerHealthy = false;
       emit({
         type: 'provider',
         ok: false,
@@ -418,6 +422,10 @@ function registerIpc() {
       ...(input.runs ? { runs: input.runs } : {}),
       ...(input.maxRunsPerDay ? { maxRunsPerDay: input.maxRunsPerDay } : {}),
       ...(input.lastRunAt ? { lastRunAt: input.lastRunAt } : {}),
+      ...(input.continuity !== undefined ? { continuity: input.continuity } : {}),
+      ...(input.lastOutput ? { lastOutput: input.lastOutput } : {}),
+      // Editing a routine is somebody looking at why it failed; clear the streak so the fix gets a run.
+      failureStreak: 0,
     };
     store.saveRoutine(routine);
     emit({ type: 'routines', routines: store.listRoutines() });
@@ -731,6 +739,20 @@ function registerIpc() {
     else mcp.stop(id);
     return mcp.statuses();
   });
+  ipcMain.handle('halo:audit', (_e, options: { limit?: number; agentId?: string; outcome?: 'allowed' | 'refused' | 'failed'; query?: string }) =>
+    runner.audit.read(options ?? {}),
+  );
+  ipcMain.handle('halo:audit.summary', (_e, days: number) => runner.audit.summary(days ?? 7));
+
+  ipcMain.handle('halo:control', (_e, agentId: string) => computer.controlOf(agentId));
+  ipcMain.handle('halo:control.take', (_e, agentId: string) => {
+    computer.takeControl(agentId);
+    // Whatever the bot was mid-way through is no longer its page to act on, so stop the turn rather
+    // than let it come back to a browser somebody else is driving.
+    runner.stop(agentId);
+  });
+  ipcMain.handle('halo:control.release', (_e, agentId: string) => computer.releaseControl(agentId));
+
   ipcMain.handle('halo:boxDir', (_e, agentId: string) => store.boxDir(agentId));
   ipcMain.handle('halo:memory', (_e, agentId: string) => runner.memory(agentId).exportText());
   ipcMain.handle('halo:memory.save', (_e, agentId: string, text: string) => runner.memory(agentId).importText(text));

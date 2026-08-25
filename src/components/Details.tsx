@@ -402,8 +402,29 @@ function RoutineEditor({ routine, onDone }: { routine: Routine; onDone: () => vo
         <div className="setting-row__desc">If it hits this, Halo pauses the routine instead of running it again.</div>
       </div>
 
+      {/*
+        A watcher that cannot see what it said last time says the same thing every hour, and a
+        routine that reports "still fine" hourly is one the user mutes. With this it is fed its own
+        last report and told to stay quiet when nothing has moved.
+      */}
+      <div className="setting-row">
+        <div className="setting-row__text">
+          <div>Remember its last report</div>
+          <div className="setting-row__desc">Feeds the bot what it told you last time so it can stay quiet when nothing changed.</div>
+        </div>
+        <button
+          className="switch"
+          data-on={routine.continuity === true}
+          aria-label="Remember its last report"
+          onClick={() => save({ continuity: !routine.continuity })}
+        />
+      </div>
+
       <div>
         <div className="section-label">Run history</div>
+        {(routine.failureStreak ?? 0) > 0 && (
+          <p className="empty-note">Failed {routine.failureStreak} time(s) in a row. Halo pauses a routine after three.</p>
+        )}
         {(routine.runs ?? []).length === 0 ? (
           <p className="empty-note">No runs yet</p>
         ) : (

@@ -463,6 +463,15 @@ function WidgetCard({ widget, onAnswer }: { widget: Widget; onAnswer: (value: st
   );
 }
 
+/** Mirrors commandPrefixOf in the runner: the executable and its subcommand, and nothing more. */
+function prefixOf(command: string): string {
+  const words = command.trim().split(/\s+/).filter(Boolean);
+  const head = words[0] ?? '';
+  const second = words[1] ?? '';
+  const takesSecond = second && !second.startsWith('-') && !/[\\/:]/.test(second) && /^[\w.-]+$/.test(second);
+  return (takesSecond ? `${head} ${second}` : head).toLowerCase();
+}
+
 /** Docked above the composer, like the original's permission bar. */
 function ApprovalDock({ approval }: { approval: ApprovalRequest }) {
   const [busy, setBusy] = useState(false);
@@ -479,9 +488,17 @@ function ApprovalDock({ approval }: { approval: ApprovalRequest }) {
         <WarningIcon size={14} />
         <span>{approval.question}</span>
       </div>
+      {/*
+        What "Always allow" actually grants. It used to say "every bot, every action of this kind",
+        which was true and much too broad: one approval to run a command became standing permission
+        to run any command. The rule is scoped now, and the card says to what.
+      */}
       <div className="approval-dock__subtitle">
-        This applies to every bot in Halo. You can always change it in Settings.
+        {approval.command
+          ? `“Always allow” remembers commands starting “${prefixOf(approval.command)}”, for every bot. Change it in Settings.`
+          : 'This applies to every bot in Halo. You can always change it in Settings.'}
       </div>
+      {approval.reason && <div className="approval-dock__subtitle">{approval.reason}</div>}
       <button className="approval-dock__disclosure" onClick={() => setOpen((v) => !v)}>
         {open ? '⌄' : '›'} {approval.summary}
       </button>

@@ -39,10 +39,12 @@ export interface CompactionResult {
 export async function compactHistory(
   provider: Settings['provider'],
   messages: ChatMessage[],
-  options: { tokenBudget: number; keepLast: number; signal?: AbortSignal },
+  options: { tokenBudget: number; keepLast: number; signal?: AbortSignal; forced?: boolean },
 ): Promise<CompactionResult> {
   if (messages.length <= options.keepLast + 2) return { messages, compacted: false };
-  if (estimateTokens(messages) <= options.tokenBudget) return { messages, compacted: false };
+  // `forced` means the model has already refused this conversation for being too long, so the local
+  // token estimate has been proved wrong about it and must not be allowed to veto the fix.
+  if (!options.forced && estimateTokens(messages) <= options.tokenBudget) return { messages, compacted: false };
 
   let cut = messages.length - options.keepLast;
   while (cut < messages.length && (messages[cut]!.role === 'tool' || messages[cut]!.role === 'assistant')) cut++;

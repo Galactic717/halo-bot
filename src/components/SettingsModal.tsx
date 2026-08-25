@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AutoReviewRule, Settings } from '../../host/types';
+import type { AuditRow, AutoReviewRule, Settings } from '../../host/types';
 import { CloseIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons';
 
 interface SettingsModalProps {
@@ -8,7 +8,7 @@ interface SettingsModalProps {
   onSave: (patch: Partial<Settings>) => Promise<void>;
 }
 
-type Tab = 'general' | 'model' | 'usage' | 'about';
+type Tab = 'general' | 'model' | 'trail' | 'usage' | 'about';
 
 export function SettingsModal({ settings, onClose, onSave }: SettingsModalProps) {
   const [tab, setTab] = useState<Tab>('general');
@@ -27,6 +27,7 @@ export function SettingsModal({ settings, onClose, onSave }: SettingsModalProps)
         <nav className="modal__nav">
           <button data-active={tab === 'general'} onClick={() => setTab('general')}>General</button>
           <button data-active={tab === 'model'} onClick={() => setTab('model')}>Model</button>
+          <button data-active={tab === 'trail'} onClick={() => setTab('trail')}>Activity</button>
           <button data-active={tab === 'usage'} onClick={() => setTab('usage')}>Usage</button>
           <button data-active={tab === 'about'} onClick={() => setTab('about')}>About</button>
         </nav>
@@ -36,6 +37,7 @@ export function SettingsModal({ settings, onClose, onSave }: SettingsModalProps)
           </button>
           {tab === 'general' && <General settings={settings} onSave={onSave} />}
           {tab === 'model' && <Model settings={settings} onSave={onSave} />}
+          {tab === 'trail' && <Trail />}
           {tab === 'usage' && <Usage />}
           {tab === 'about' && <About />}
         </div>
@@ -124,6 +126,26 @@ function General({ settings, onSave }: { settings: Settings; onSave: SettingsMod
             <option value="smart">Smart</option>
           </select>
         </div>
+
+        <div className="setting-row">
+          <div className="setting-row__text">
+            <div>What a refusal does</div>
+            <div className="setting-row__desc">
+              Dry run decides and writes it to Activity without stopping the bot, so you can watch a new rule work
+              before it starts refusing things. Halo&apos;s own floor — wiping a drive, deleting your backups — still
+              refuses in both.
+            </div>
+          </div>
+          <select
+            className="input"
+            style={{ width: 160 }}
+            value={settings.policyMode ?? 'enforce'}
+            onChange={(e) => void onSave({ policyMode: e.target.value as Settings['policyMode'] })}
+          >
+            <option value="enforce">Refuse</option>
+            <option value="dry-run">Dry run</option>
+          </select>
+        </div>
       </div>
 
       <HiddenBots />
@@ -163,7 +185,15 @@ function General({ settings, onSave }: { settings: Settings; onSave: SettingsMod
         </div>
         {settings.rules.map((rule) => (
           <div className="setting-row" key={rule.id}>
-            <div className="setting-row__text">{rule.when}</div>
+            <div className="setting-row__text">
+              <div>{rule.when}</div>
+              {/* What the rule actually covers, so a scoped one does not read as a blanket. */}
+              {(rule.commandPrefix || rule.surface) && (
+                <div className="setting-row__desc">
+                  {rule.commandPrefix ? `only commands starting "${rule.commandPrefix}"` : `only ${rule.surface?.replace(/_/g, ' ')}`}
+                </div>
+              )}
+            </div>
             <span className="setting-row__desc">{rule.decision}</span>
             <button
               className="icon-button"
@@ -323,6 +353,84 @@ function Model({ settings, onSave }: { settings: Settings; onSave: SettingsModal
           value={provider.maxSteps}
           onChange={(e) => commit({ maxSteps: Number(e.target.value) })}
         />
+      </div>
+    </>
+  );
+}
+
+/**
+ * What the bots were allowed to do, what they were refused, and what then failed.
+ *
+ * The refusals are the interesting rows and they used to be invisible: a denied tool call became one
+ * muted line in a transcript nobody scrolls back through, and a rule that was quietly refusing work
+ * every day looked like a bot being unhelpful.
+ */
+function Trail() {
+  const [rows, setRows] = useState<AuditRow[]>([]);
+  const [totals, setTotals] = useState({ allowed: 0, refused: 0, failed: 0 });
+  const [outcome, setOutcome] = useState<'' | AuditRow['outcome']>('');
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState<string | null>(null);
+
+  const load = () => {
+    void window.halo
+      .audit({ limit: 300, ...(outcome ? { outcome } : {}), ...(query.trim() ? { query: query.trim() } : {}) })
+      .then(setRows);
+    void window.halo.auditSummary(7).then(setTotals);
+  };
+
+  useEffect(load, [outcome, query]);
+
+  return (
+    <>
+      <h2>Activity</h2>
+      <div className="setting-row__desc" style={{ marginBottom: 12 }}>
+        Every action that went through the approval gate, decided before it ran. Last seven days:{' '}
+        <b>{totals.allowed}</b> allowed, <b>{totals.refused}</b> refused, <b>{totals.failed}</b> failed.
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input className="input" style={{ flex: 1 }} placeholder="Search the trail" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <select className="input" style={{ width: 150 }} value={outcome} onChange={(e) => setOutcome(e.target.value as typeof outcome)}>
+          <option value="">Everything</option>
+          <option value="refused">Refused</option>
+          <option value="failed">Failed</option>
+          <option value="allowed">Allowed</option>
+        </select>
+        <button className="icon-button" onClick={load} aria-label="Refresh"><RefreshIcon /></button>
+      </div>
+
+      <div className="card">
+        {rows.length === 0 && <div className="setting-row__desc">Nothing on the trail yet.</div>}
+        {rows.map((row, i) => {
+          const id = `${row.at}-${i}`;
+          return (
+            <div className="trail-row" key={id} data-outcome={row.outcome}>
+              <button className="trail-row__head" onClick={() => setOpen(open === id ? null : id)}>
+                <span className="trail-row__dot" data-outcome={row.outcome} />
+                <span className="trail-row__who">{row.agentName}</span>
+                <span className="trail-row__what">{row.summary}</span>
+                <span className="trail-row__when">{new Date(row.at).toLocaleString()}</span>
+              </button>
+              {open === id && (
+                <div className="trail-row__body">
+                  <div>
+                    {row.tool} · {row.surface}
+                    {row.intent ? ` · ${row.intent}` : ''} · {row.outcome}
+                    {row.dryRun ? ' (dry run — recorded, not blocked)' : ''}
+                  </div>
+                  {row.matched && (
+                    <div>
+                      {row.outcome === 'refused' ? 'Refused by' : 'Decided by'} {row.source}: <b>{row.matched}</b>
+                    </div>
+                  )}
+                  {row.failure && <div className="trail-row__failure">Failed: {row.failure}</div>}
+                  {row.detail && <pre>{row.detail}</pre>}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </>
   );

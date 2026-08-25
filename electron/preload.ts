@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { Agent, ApprovalDecision, Channel, HaloEvent, Message, Routine, Settings, Snapshot } from '../host/types';
+import type { Agent, ApprovalDecision, AuditRow, Channel, ControlState, HaloEvent, Message, Routine, Settings, Snapshot } from '../host/types';
 import type { McpServerSpec, McpServerStatus } from '../host/mcp';
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -101,6 +101,15 @@ const api = {
   installPlugin: (spec: McpServerSpec): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.install', spec),
   removePlugin: (id: string): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.remove', id),
   togglePlugin: (id: string, enabled: boolean): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.toggle', id, enabled),
+  audit: (options: { limit?: number; agentId?: string; outcome?: 'allowed' | 'refused' | 'failed'; query?: string } = {}): Promise<AuditRow[]> =>
+    ipcRenderer.invoke('halo:audit', options),
+  auditSummary: (days: number): Promise<{ allowed: number; refused: number; failed: number }> =>
+    ipcRenderer.invoke('halo:audit.summary', days),
+
+  control: (agentId: string): Promise<ControlState> => ipcRenderer.invoke('halo:control', agentId),
+  takeControl: (agentId: string): Promise<void> => ipcRenderer.invoke('halo:control.take', agentId),
+  releaseControl: (agentId: string): Promise<void> => ipcRenderer.invoke('halo:control.release', agentId),
+
   boxDir: (agentId: string): Promise<string> => ipcRenderer.invoke('halo:boxDir', agentId),
   memory: (agentId: string): Promise<string> => ipcRenderer.invoke('halo:memory', agentId),
   saveMemory: (agentId: string, text: string): Promise<void> => ipcRenderer.invoke('halo:memory.save', agentId, text),

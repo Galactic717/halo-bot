@@ -17,6 +17,10 @@ export interface ComputerPort {
   act(agentId: string, action: string, params: Record<string, unknown>): Promise<string>;
   readPage(agentId: string): Promise<string>;
   screenshot(agentId: string): Promise<string>;
+  /** The page's controls, each with an opaque ref this process resolves later. */
+  snapshot(agentId: string): Promise<string>;
+  /** What a ref points at, for the approval card and the audit row. Undefined when it does not resolve. */
+  describeRef(agentId: string, ref: string): { role: string; name: string } | undefined;
 }
 
 export interface RunnerPort {
@@ -103,13 +107,40 @@ function boxPath(ctx: ToolContext, p: string): string {
   return full;
 }
 
+/**
+ * The environment a command sees.
+ *
+ * An allow list, not a deny list. This process holds the user's API key and every plugin credential
+ * it decrypted at boot, and spreading `process.env` into a child makes `Get-ChildItem env:` print
+ * them — a deny list is only the secrets that existed the day it was written. PATH, locale and the
+ * proxy variables pass, because a command that cannot find `git`, cannot speak the user's language,
+ * or cannot reach the network behind a proxy is not a shell. Lifted from OpenBot's shell, which
+ * makes the same argument at more length.
+ */
+const SHELL_ENV_NAMES = [
+  'PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec', 'TEMP', 'TMP',
+  'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'ProgramData',
+  'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'NUMBER_OF_PROCESSORS',
+  'PROCESSOR_ARCHITECTURE', 'OS', 'USERNAME', 'COMPUTERNAME', 'LANG', 'LC_ALL',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+];
+
+export function shellEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of SHELL_ENV_NAMES) {
+    const value = source[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
+
 export function runShell(command: string, cwd: string, signal: AbortSignal, timeoutMs = 120_000): Promise<{ code: number; out: string }> {
   return new Promise((resolveP) => {
     mkdirSync(cwd, { recursive: true });
     const child = spawn(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
-      { cwd, windowsHide: true },
+      { cwd, windowsHide: true, env: shellEnvironment() },
     );
     let out = '';
     const push = (b: Buffer) => {
@@ -480,13 +511,14 @@ export const TOOLS: Tool[] = [
     schema: {
       name: 'Browser',
       description:
-        'Drive the browser on your computer - this is how you use websites and apps the user is already signed into. Actions: navigate, read, click, type, press, scroll, back, screenshot.',
+        'Drive the browser on your computer - this is how you use websites and apps the user is already signed into. Actions: navigate, read, snapshot, click, type, press, scroll, back, screenshot. Take a snapshot before you click or type: it lists the controls on the page with a ref each, and acting by ref is what makes the action land on the thing you actually saw.',
       parameters: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['navigate', 'read', 'click', 'type', 'press', 'scroll', 'back', 'screenshot'] },
+          action: { type: 'string', enum: ['navigate', 'read', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'screenshot'] },
           url: { type: 'string' },
-          selector: { type: 'string', description: 'CSS selector, or visible text for click.' },
+          ref: { type: 'string', description: 'A ref from the last snapshot, e.g. "e12". Preferred over selector.' },
+          selector: { type: 'string', description: 'CSS selector, or visible text. Only when you have no ref.' },
           text: { type: 'string' },
           key: { type: 'string' },
           amount: { type: 'number' },
@@ -503,6 +535,7 @@ export const TOOLS: Tool[] = [
         return { output: `Now on ${r.title} - ${r.url}` };
       }
       if (action === 'read') return { output: clip(await ctx.computer.readPage(ctx.agentId)) };
+      if (action === 'snapshot') return { output: clip(await ctx.computer.snapshot(ctx.agentId)) };
       if (action === 'screenshot') {
         const path = await ctx.computer.screenshot(ctx.agentId);
         return { output: `Screenshot saved to ${path}`, imagePath: path };
