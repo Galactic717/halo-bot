@@ -109,6 +109,16 @@ class McpClient {
     delete this.error;
     try {
       const launch = resolveLaunch(this.spec);
+      /*
+       * The whole environment, unlike `shellEnvironment()` in host/tools.ts — and on purpose.
+       *
+       * That allow-list exists because a bot writes the command and a bot can be talked into printing
+       * `env`. A plugin is the opposite case: the user chose it, installed it, and gave it its
+       * credentials, and the published servers genuinely read things an allow-list would have to
+       * guess at — a proxy, a CA bundle, a home directory, whatever their SDK looks for. Halo's own
+       * secrets are not in here to leak: the API key and the plugin credentials are decrypted into
+       * this process's memory, never into its environment.
+       */
       this.child = spawn(launch.file, launch.args, {
         env: { ...process.env, ...launch.env, ...(this.spec.env ?? {}) },
         windowsHide: true,
