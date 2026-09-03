@@ -27,6 +27,11 @@ import com.halo.bot.core.fenceContent
 import com.halo.bot.core.fenceRules
 import com.halo.bot.core.fenceToolResult
 import com.halo.bot.core.providerFor
+import com.halo.bot.core.MAX_ENABLED_ROUTINES
+import com.halo.bot.core.MIN_INTERVAL_MINUTES
+import com.halo.bot.core.clampTrigger
+import com.halo.bot.core.clampTriggers
+import com.halo.bot.core.enabledSlotReason
 import com.halo.bot.core.classifyProviderError
 import com.halo.bot.core.commandPrefixOf
 import com.halo.bot.core.languageSection
@@ -665,6 +670,44 @@ class HaloTest {
         assertEquals(0, store.llmHistory(agent.id).size)
         assertEquals(0, store.llmHistory(agent.id, "room-1").size)
         assertFalse(store.agentDir(agent.id).exists())
+    }
+
+    @Test
+    fun `a routine cannot be talked into firing every minute, and a room only holds so many`() {
+        // OpenBot's floor, for OpenBot's reason: a model can be talked into anything a sentence can
+        // describe, and the floor is what a sentence cannot talk its way past.
+        assertEquals(
+            MIN_INTERVAL_MINUTES,
+            clampTrigger(RoutineTrigger(kind = "interval", everyMinutes = 1)).everyMinutes,
+        )
+        assertEquals(
+            MIN_INTERVAL_MINUTES,
+            clampTrigger(RoutineTrigger(kind = "interval", everyMinutes = 0)).everyMinutes,
+        )
+        // Above the floor a person's own number is theirs.
+        assertEquals(90, clampTrigger(RoutineTrigger(kind = "interval", everyMinutes = 90)).everyMinutes)
+
+        // Nothing else is touched.
+        val daily = RoutineTrigger(kind = "daily", hour = 9, minute = 0)
+        val clamped = clampTriggers(listOf(daily, RoutineTrigger(kind = "interval", everyMinutes = 3)))
+        assertEquals(daily, clamped[0])
+        assertEquals(MIN_INTERVAL_MINUTES, clamped[1].everyMinutes)
+
+        // The cap counts what is switched on, not what exists.
+        fun routine(i: Int, on: Boolean) = Routine(
+            id = "r$i",
+            agentId = "a",
+            name = "r$i",
+            prompt = "",
+            triggers = listOf(daily),
+            enabled = on,
+            createdAt = 0,
+        )
+        val full = (0 until MAX_ENABLED_ROUTINES).map { routine(it, true) }
+        assertNotNull(enabledSlotReason(full))
+        assertNull(enabledSlotReason(full.drop(1) + routine(99, false)))
+        // Saving a change to one that is already on must not count it against itself.
+        assertNull(enabledSlotReason(full, "r0"))
     }
 }
 

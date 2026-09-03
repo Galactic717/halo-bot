@@ -149,7 +149,13 @@ async function main() {
     // One turn: work in the box, reach for the user's machine, then report.
     { calls: [{ name: 'Shell', args: { command: 'Write-Output hello' } }] },
     { calls: [{ name: 'ExternalShell', args: { command: 'git status', cwd: 'C:/' } }] },
-    { calls: [{ name: 'SendMessage', args: { text: 'Ran both. Nothing to report.' } }] },
+    // Plain text *and* the same line through SendMessage, which is what a model does when it has
+    // been told SendMessage is the only channel. The streamed preview must not survive as a second
+    // bubble saying the same thing.
+    {
+      text: 'Ran both. Nothing to report.',
+      calls: [{ name: 'SendMessage', args: { text: 'Ran both. Nothing to report.' } }],
+    },
   ]);
 
   const store = new Store(root);
@@ -192,6 +198,14 @@ async function main() {
   check(
     events.some((e) => e.type === 'approval' && e.approval.surface === 'external_shell'),
     'a command on the user\'s machine stops at the approval gate',
+  );
+  check(
+    transcript.filter((m) => m.role === 'agent' && m.text.includes('Ran both')).length === 1,
+    'the streamed preview is not a second copy of the answer',
+    transcript
+      .filter((m) => m.role === 'agent')
+      .map((m) => m.text.slice(0, 40))
+      .join(' | '),
   );
 
   const lines = llmLines(root, agent.id);

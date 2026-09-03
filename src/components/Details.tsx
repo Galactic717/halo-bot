@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Agent, Routine, RoutineTrigger } from '../../host/types';
 import { checkEndpoint } from '../../host/agui';
 import { PERSONAS } from '../../host/personas';
+import { clampTrigger, MIN_INTERVAL_MINUTES } from '../../host/scheduler';
 import { Avatar, AVATAR_COLORS } from './Avatar';
 import {
   ChevronLeftIcon,
@@ -501,9 +502,9 @@ function TriggerRow({
         <input
           className="input"
           type="number"
-          min={5}
+          min={MIN_INTERVAL_MINUTES}
           value={trigger.everyMinutes}
-          onChange={(e) => onChange({ kind: 'interval', everyMinutes: Math.max(5, Number(e.target.value)) })}
+          onChange={(e) => onChange(clampTrigger({ kind: 'interval', everyMinutes: Number(e.target.value) }))}
         />
       ) : (
         <input className="input" type="time" value={time} onChange={(e) => changeTime(e.target.value)} />

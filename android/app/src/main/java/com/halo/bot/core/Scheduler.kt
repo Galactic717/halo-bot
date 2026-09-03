@@ -63,6 +63,47 @@ fun nextRun(routine: Routine, from: Long = System.currentTimeMillis()): Long {
 private const val DEFAULT_MAX_RUNS_PER_DAY = 24
 
 /**
+ * The shortest interval a routine may fire on, wherever it was written.
+ *
+ * Ported from OpenBot's `MINIMUM_INTERVAL_MS`, and its reasoning is the whole point: a model can
+ * be talked into anything a sentence can describe, including "check this every minute", and the
+ * floor is what a sentence cannot talk its way past. The daily cap already limits the damage, but
+ * it does it by pausing the routine after the fact — the floor prevents the misconfiguration
+ * instead of punishing it. It applies to the editor too, because one field that means two
+ * different things depending on who filled it in is worse than one rule.
+ */
+const val MIN_INTERVAL_MINUTES = 15
+
+/**
+ * How many routines may be switched on at once.
+ *
+ * OpenBot's cap, for OpenBot's reason: a conversation is an easy place to accumulate standing
+ * work without noticing, and twenty is roughly where a person's own list stops being something
+ * they can hold in their head. Switching one off frees a slot; deleting it is not required.
+ */
+const val MAX_ENABLED_ROUTINES = 20
+
+/** Applies the interval floor. Every path that builds a trigger goes through this one. */
+fun clampTrigger(trigger: RoutineTrigger): RoutineTrigger =
+    if (trigger.kind != "interval") trigger
+    else trigger.copy(everyMinutes = maxOf(MIN_INTERVAL_MINUTES, trigger.everyMinutes))
+
+fun clampTriggers(triggers: List<RoutineTrigger>): List<RoutineTrigger> = triggers.map(::clampTrigger)
+
+/**
+ * Whether one more routine may be switched on, and what to say when it may not.
+ *
+ * `exceptId` is the routine being edited, so saving a change to one that is already on does not
+ * count it twice against the cap.
+ */
+fun enabledSlotReason(routines: List<Routine>, exceptId: String? = null): String? {
+    val on = routines.count { it.enabled && it.id != exceptId }
+    if (on < MAX_ENABLED_ROUTINES) return null
+    return "$MAX_ENABLED_ROUTINES routines are already switched on, which is the limit. " +
+        "Switch one off before adding another."
+}
+
+/**
  * Consecutive failures before a routine is paused.
  *
  * A routine whose site moved or whose command no longer exists fails identically every time. Left
@@ -203,6 +244,19 @@ class Scheduler(
         }
         val streak = if (ok) 0 else routine.failureStreak + 1
         val exhausted = streak >= FAILURE_STREAK_LIMIT
+        /*
+         * Exactly two messages about a failing routine, ever: the first failure after a success,
+         * and the one that switches it off. OpenBot calls this the fatigue rule and it is right —
+         * a routine whose token expired in March fails cleanly every single night, and a line per
+         * firing is how a person learns to skim past the one line that mattered. Silence in
+         * between is the feature.
+         */
+        if (!ok && streak == 1) {
+            runner.systemEvent(
+                routine.agentId,
+                SystemEvent("routine", "\"${routine.name}\" failed", note?.take(80)),
+            )
+        }
         if (exhausted) {
             runner.systemEvent(
                 routine.agentId,

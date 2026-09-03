@@ -616,7 +616,7 @@ val TOOLS: List<Tool> = listOf(
         ToolSchema(
             "CreateRoutine",
             "Save a recurring task for yourself. It fires on a schedule and you run the prompt as if the user had sent it.",
-            params("""{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"every_minutes":{"type":"number"},"daily_at":{"type":"string","description":"HH:MM, 24h"},"weekdays_at":{"type":"string","description":"HH:MM, Monday to Friday only"},"weekly_on":{"type":"string","description":"e.g. \"mon 09:00\""},"webhook":{"type":"boolean","description":"Instead of a schedule, fire when something calls in. Halo returns a loopback URL to give the user."}},"required":["name","prompt"]}"""),
+            params("""{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"every_minutes":{"type":"number","description":"Minutes between runs. 15 is the shortest Halo allows; anything less is raised to it."},"daily_at":{"type":"string","description":"HH:MM, 24h"},"weekdays_at":{"type":"string","description":"HH:MM, Monday to Friday only"},"weekly_on":{"type":"string","description":"e.g. \"mon 09:00\""},"webhook":{"type":"boolean","description":"Instead of a schedule, fire when something calls in. Halo returns a loopback URL to give the user."}},"required":["name","prompt"]}"""),
         ),
         ApprovalSurface.AGENT_WRITE,
     ) { ctx, args ->
@@ -625,6 +625,9 @@ val TOOLS: List<Tool> = listOf(
                 "Give one of every_minutes, daily_at, weekdays_at, weekly_on, or webhook: true.",
                 isError = true,
             )
+        enabledSlotReason(ctx.store.listRoutines())?.let {
+            return@Tool ToolResult("$it Tell the user, and offer to switch one off.", isError = true)
+        }
         val routine = Routine(
             id = UUID.randomUUID().toString(),
             agentId = ctx.agentId,
@@ -1006,7 +1009,8 @@ fun parseTrigger(args: Args): RoutineTrigger? {
         return RoutineTrigger(kind = "webhook", token = UUID.randomUUID().toString().replace("-", ""))
     }
     val every = args.int("every_minutes", 0)
-    if (every > 0) return RoutineTrigger(kind = "interval", everyMinutes = every)
+    // The floor is applied here rather than trusted to the caller: this is the path a model writes.
+    if (every > 0) return clampTrigger(RoutineTrigger(kind = "interval", everyMinutes = every))
 
     val weekdays = args.str("weekdays_at")
     Regex("^(\\d{1,2}):(\\d{2})$").find(weekdays)?.let {

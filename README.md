@@ -2,164 +2,111 @@
 
 # Halo Bot
 
-**AI teammates you can give real work to — running on your own machine.**
+**AI teammates you can hand real work to, on hardware you own.**
 
-Named bots with persistent memory, their own workspace and browser, routines on a schedule,
-skills they learn by watching you, and an approval gate in front of anything that touches your
-computer. Windows and Android. No cloud, no account, no telemetry.
+[**Quick start**](#quick-start) · [**What it does**](#what-a-bot-can-do) · [**Staying in control**](#staying-in-control) · [**Architecture**](#architecture) · [**Verification**](#verification) · [**Docs**](#documentation)
 
-[![tests](https://img.shields.io/badge/desktop%20tests-52%20passing-2ea043)](host/halo.test.ts)
-[![android tests](https://img.shields.io/badge/android%20tests-42%20passing-2ea043)](android/app/src/test/java/com/halo/bot/HaloTest.kt)
-[![end to end](https://img.shields.io/badge/end%20to%20end-18%20checks-2ea043)](scripts/verify.mts)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![platforms](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Android-6f42c1)](docs/ANDROID.md)
+[![CI](https://github.com/Galactic717/halo-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/Galactic717/halo-bot/actions/workflows/ci.yml)
+[![desktop tests](https://img.shields.io/badge/desktop-53%20tests-2ea043)](host/halo.test.ts)
+[![android tests](https://img.shields.io/badge/android-43%20tests-2ea043)](android/app/src/test/java/com/halo/bot/HaloTest.kt)
+[![end to end](https://img.shields.io/badge/end%20to%20end-19%20checks-2ea043)](scripts/verify.mts)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
-<img src="docs/screenshots/chat.png" width="900" alt="Halo Bot: a bot's chat, its live browser, its routines and its skills">
+<img src="docs/screenshots/chat.png" width="900" alt="A bot writing a file in its own box, with its live browser, its routines and its skills beside the conversation">
+
+Give a bot a name and a job. It gets a workspace of its own, a real browser with its own
+logins, memory that outlives the conversation, and a schedule if you want one. It works
+while you are elsewhere and comes back when the job is done or a decision is yours.
+Every action it takes on your machine is decided before it happens and recorded after.
 
 </div>
 
----
+> **Runs on your machine.** There is no hosted version and no account. The model is yours to
+> choose — a local Ollama, LM Studio or llama.cpp, or a key for x.ai, OpenRouter, OpenAI or
+> DeepSeek. Nothing leaves the machine except the model call you configured.
 
-## Why this exists
-
-In August 2026 xAI shipped **Grok Bot**: named agents with a persistent computer, a browser, a
-schedule and an approval gate. It is a good product and this project is an unashamed clone of the
-model of working it introduced — built from a teardown of the product, not from its code.
-
-Then, in version 0.27, `dist/host/host-main.cjs` disappeared from its bundle. The whole agent
-runtime moved onto xAI's servers. From that release, your bots' files, their browser sessions and
-your logins live on somebody else's computer.
-
-Halo Bot's runtime is a folder on yours.
-
-That is the entire pitch, and everything below is a consequence of it.
-
-| | Grok Bot 0.27 | Halo Bot |
-|---|---|---|
-| Where the agent runs | xAI's servers | your machine |
-| Where your logins live | a shared cloud computer | a per-bot session on your disk |
-| Isolation between bots | none — one computer, one credential pool <sup>[1](#f1)</sup> | its own box, its own browser session, its own permissions |
-| Action-level audit trail | on the roadmap <sup>[2](#f2)</sup> | shipped — written *before* each action, with the rule that decided it |
-| Model | Grok 4.6, metered | anything OpenAI-compatible: Ollama, LM Studio, llama.cpp, x.ai, OpenRouter, OpenAI, DeepSeek |
-| Cost of running it | $200/month tiers | your electricity |
-| Deleting a bot | may leave its files and sessions behind <sup>[1](#f1)</sup> | box, transcript, memory, skills and browser session, all gone |
-
-<a name="f1">1.</a> [Grok Bot security, explained](https://cellcog.ai/blog/grok-bot-security/) —
-"every credential on the machine is reachable by every Bot, present and future".
-<a name="f2">2.</a> [Grok Bot for enterprise AI agents](https://beam.ai/agentic-insights/grok-bot-enterprise-ai-agents).
+> **Alpha.** It works, it is tested, and it is early. Expect rough edges and expect things to move.
 
 ---
 
-## What a bot actually does
+## What it is
 
-<table>
-<tr>
-<td width="50%" valign="top">
+A desktop agent app, and the same app again on a phone.
 
-**Its own box.** `%APPDATA%/Halo Bot/agents/<id>/box`, where `Shell`, `Read`, `Write`, `Edit` and
-`ListFiles` run without asking. On Windows the folder is labelled Low integrity and commands run
-through `halo-box.exe` inside a job object, so the kernel — not a regular expression — refuses
-writes outside it. On Android it is the app sandbox, which is the same boundary for free.
+Each **bot** is a durable thing rather than a chat session: its own conversation, its own memory,
+its own folder on disk, its own browser profile, its own permissions, and optionally its own model.
+You talk to it, it does the work, and next week it still knows what you told it.
 
-**Its own browser.** A real Chromium screen you can watch live and take over with one click. The
-bot works from a **snapshot**: it lists the page's controls with a ref each and clicks by ref, so
-an action lands on the control Halo actually saw rather than a selector the model invented. One
-browser has one driver — while you hold the wheel, the bot's actions there are refused, not queued.
+Bots are not sandboxed from *you* — they are sandboxed from **each other** and from the rest of your
+machine. A bot's shell runs at Low integrity inside a job object, so Windows itself refuses writes
+outside its box. Reaching onto your machine is a different surface with a different answer, and it
+goes through an approval gate that writes the row before it acts.
 
-**Your computer, behind the gate.** `ExternalShell`, `ExternalRead`, `CopyToBox`, `CopyFromBox`.
+Nothing about that is optional or bolt-on. It is the reason the app exists in this shape.
 
-</td>
-<td width="50%" valign="top">
+## Features
 
-**Teammates.** `CreateAgent`, `SendToAgent`, channels with `@mentions`. Bots hand work to each other
-and post into rooms.
-
-**Background workers.** `Task` hands a tightly-scoped job to a browser, research or shell worker.
-`MessageSubagent` redirects one mid-flight without throwing away what it has found.
-
-**Memory** in three tiers, extracted automatically after every exchange and loaded into every turn.
-
-**Routines** on interval, daily, weekdays, weekly or **webhook** triggers — a loopback URL any
-script, Task Scheduler or folder watcher can call.
-
-**Your automations.** Point Halo at your own n8n and every service you have already connected there
-becomes something a bot can read, write and fire — with the credentials staying in n8n.
-
-**Plugins.** A marketplace of real, published MCP servers, plus *paste the config* for anything else.
-
-</td>
-</tr>
-</table>
+- **A box per bot** — `Shell`, `Read`, `Write`, `Edit` and `ListFiles` run freely inside it. On Windows the folder is labelled Low integrity and commands go through `halo-box.exe` in a job object, so the boundary is the kernel's and not a regular expression's. On Android it is the app sandbox, which is the same boundary for free.
+- **A browser per bot** — a real Chromium screen you watch live and take over with one click, with **its own cookie jar**: a bot cannot reach a site another bot signed into, and deleting a bot deletes its logins. It works from a **snapshot** — the page's controls listed with a ref each — and clicks by ref, so an action lands on the control Halo actually saw rather than a selector the model invented.
+- **One browser, one driver** — a bot that meets a login wall asks for help; you take the wheel, do the part only you can do, and hand it back. While you hold it, the bot's actions there are refused rather than queued.
+- **Your computer, behind the gate** — `ExternalShell`, `ExternalRead`, `CopyToBox` and `CopyFromBox` each stop for approval, scoped to what was actually approved: saying yes to `git status` grants commands starting `git status`, not a shell.
+- **An audit trail written before the action** — every gated action, allowed, refused or failed, with the rule that decided it. A permitted action that then failed gets its own second row, because "allowed" and "happened" are different facts. Anything shaped like a key is masked before it reaches disk.
+- **A floor nothing can lower** — wiping a drive, deleting your backups or shadow copies, formatting a volume, rewriting the boot configuration. Refused with approvals off, with execution set to Allow, with the folder granted, with a rule that says allow. There is a test that turns every switch the wrong way and asserts it still refuses.
+- **Everything from outside is data, never instructions** — a web page, a file, a plugin's reply, a teammate's message, a background worker's report, text inside a screenshot. All of it arrives inside a marker whose suffix is random per run, and the bot is told nothing inside it can order an action.
+- **Memory in three tiers** — profile, log and note, extracted automatically after each exchange, decayed by age, and loaded into every turn. Editable as plain text.
+- **Routines** — interval, daily, weekdays, weekly or **webhook**, several per routine, with a test run and run history. A 15-minute floor and a cap of 20 switched on keep a sentence from scheduling more standing work than anybody meant. A routine waits out a model-server outage rather than spending its daily allowance on one, says so once when it starts failing, and switches itself off after three.
+- **Skills, learned by watching** — press **Teach a task**, do the thing once, and the bot writes the skill with the selectors intact. Passwords are never recorded. It saves the *shape* of the task: anything that would differ next time becomes a named input written `{like_this}`.
+- **Teammates and rooms** — `CreateAgent`, `SendToAgent`, channels with `@mentions`. Bots hand work to each other, and a room stops after a few hops so two bots cannot volley forever without you.
+- **Background workers** — `Task` hands a tightly-scoped job to a browser, research or shell worker that reports back. `MessageSubagent` redirects one mid-flight without throwing away what it has found.
+- **Plugins** — a marketplace of real, published MCP servers, plus **paste the config**: the JSON snippet the server's own README prints for Claude Desktop, Cursor or VS Code. Past eight plugin tools the schemas stop travelling in every prompt and the bot looks them up on demand, which is what keeps a small local model's window usable.
+- **Your own automations** — point Halo at an n8n you already run and every service connected there becomes something a bot can read, write and fire, with the credentials staying in n8n. Reading is free; writing, activating and firing ask first.
+- **Bring your own agent** — give a bot an AG-UI endpoint and its turns run there, on any framework. It is offered Halo's toolset and every call comes back through the same gate onto the same trail, so hosting somebody else's agent is not the same as trusting it.
+- **Secrets sealed at rest** — the API key, every plugin credential and any endpoint header are encrypted with the OS keychain or the Android keystore before `settings.json` is written.
+- **A shell sees an allow-list** — PATH, locale and proxy variables, not this process's environment, so `Get-ChildItem env:` cannot print what the app decrypted at boot.
 
 <div align="center">
+<img src="docs/screenshots/new-bot.png" width="440" alt="Creating a bot: templates, voices, and a model per bot">
 <img src="docs/screenshots/plugins.png" width="440" alt="The plugin marketplace">
-<img src="docs/screenshots/command-palette.png" width="440" alt="The command palette">
 </div>
 
----
+## Requirements
 
-## Staying in control
+- **Windows 10/11** for the desktop app, or **Android 8+** for the phone build.
+- **Node.js 22.6+** to build it. Node runs the TypeScript directly, so there is no separate compile step for the tests.
+- **A model server that speaks OpenAI-compatible chat completions and supports tool calling.** [Ollama](https://ollama.com) is the easy local answer; LM Studio and llama.cpp work; so does any hosted key.
+- **Rust** only if you want the box confinement helper compiled from source. Without it the app still runs, says so on its About screen, and the box is a folder rather than a boundary.
 
-This is the part the product is actually about.
+> **The model needs a context window of about 8k or more.** The system prompt plus the tool schemas
+> is several thousand tokens, and a server with a smaller window silently truncates the request — the
+> model never sees its instructions, answers in plain text, and the turn ends with nothing sent.
+> Ollama's default is 4096, which is below that floor: start it with `OLLAMA_CONTEXT_LENGTH=16384`.
+> Halo says so in the transcript when it detects a truncated prompt.
 
-<img src="docs/screenshots/activity.png" width="900" alt="Activity: every gated action, allowed, refused or failed, with the rule that decided it">
+## Quick start
 
-**A floor nothing can lower.** Wiping a drive, deleting your backups or shadow copies, formatting a
-volume, rewriting the boot configuration: refused outright — with approvals off, with execution set
-to Allow, with the folder granted, with a rule that says allow. Patterns are anchored to command
-positions and checked against quote-masked and payload-unwrapped variants, so
-`powershell -Command "Remove-Item C:\ -Recurse"` does not slip past by hiding inside a flag. There is
-a test that turns every switch the wrong way and asserts it still refuses.
+1. Install and build:
 
-**Everything else asks, once, in the right words.** *Always allow / Allow once / Never* — and
-"Always" is remembered **scoped to the action**, so approving `git status` grants commands starting
-`git status`, not a shell.
+   ```bash
+   npm install
+   npm start
+   ```
 
-**Rules in plain language, or as expressions.** *"when a bot wants to read files from my Downloads
-folder → allow automatically"*, or
-`intent == "run_command" && contains(command, "npm publish")` when a sentence will not do it. Deny
-always beats allow, so a rule that removes permission cannot be defeated by a broader one that
-grants it.
+2. Point it at a model. The setup screen looks for a server on this machine and ranks what it finds
+   by whether it supports tool calling and whether it fits in your memory. Or paste a key.
 
-**Smart review.** The model gets a second opinion on anything the rules would wave through — with
-the command's comments stripped and inside a fence, and your rules on the trusted channel, so a
-comment in the command cannot argue its own way past the check.
+3. Press **Ctrl+N**, give the bot a name, and give it something concrete.
 
-**Dry run.** Decide and record without blocking, so you can watch a new rule work before it starts
-refusing things. The floor still refuses.
-
-**The trail.** Every gated action, allowed, refused or failed, with the rule that decided it. The row
-is written *before* the action runs, so nothing acts without appearing there — and a permitted action
-that then failed gets its own second row, because "allowed" and "happened" are different facts.
-Anything shaped like a key is masked before it reaches disk.
-
-**Everything from outside is data, never instructions.** A web page, a file, a plugin's reply, a
-teammate's message, a background worker's report, text inside a screenshot — all of it arrives wrapped
-in a marker whose suffix is random per run, and the bot is told that nothing inside it can order an
-action. A page cannot close a fence it has never seen, and the marker is stripped out of the content
-as well, so it cannot forge one either.
-
-<img src="docs/screenshots/settings.png" width="900" alt="Settings: reply language, execution on your computer, auto-review, review depth, dry run">
-
----
-
-## Install
-
-Build the installer yourself:
+To build an installer instead — a Start-menu entry, a desktop shortcut and start-with-Windows:
 
 ```bash
-npm install
-npm run package
+npm run package        # release/Halo Bot Setup 0.1.0.exe
 ```
 
-`release/Halo Bot Setup 0.1.0.exe` installs the app with a Start-menu and desktop shortcut, and can
-start with Windows.
-
-Run it from source:
+Hot reload while working on it:
 
 ```bash
-npm start          # build and launch
-npm run dev        # hot reload
+npm run dev
 ```
 
 The phone build:
@@ -168,20 +115,39 @@ The phone build:
 cd android && ./gradlew :app:installDebug
 ```
 
-### First run
+## Try it
 
-The setup screen looks for a model server on this machine (Ollama, LM Studio, llama.cpp) and ranks
-what it finds by whether it supports tool calling and whether it fits in your memory. You can also
-paste a key for x.ai, OpenRouter, OpenAI or DeepSeek. Anything OpenAI-compatible works; the model
-needs tool calling, and vision if you want your bots to look at screenshots.
+- `Write plan.md in your box with three short bullets on what you can do, then read it back.`
+- `Open news.ycombinator.com and tell me the top story.` — then watch the browser pane.
+- `Run git status in D:\some\repo` — and watch it stop for approval. Open **Settings → Activity**
+  afterwards and read the row it wrote before it ran.
+- `Every weekday at nine, check that site and tell me if it changed.` — then look under **Routines**
+  in the details pane.
 
-> **The model needs a context window of at least ~8k.** The system prompt plus the tool schemas is
-> several thousand tokens, and a server with a smaller window silently truncates the request — the
-> model never sees its instructions, answers in plain text, and the turn ends with nothing sent.
-> Ollama's default is 4096, which is below that floor: start it with `OLLAMA_CONTEXT_LENGTH=16384`.
-> Halo says so in the transcript when it detects a truncated prompt.
+## Staying in control
 
----
+<img src="docs/screenshots/activity.png" width="900" alt="Activity: every gated action, allowed, refused or failed, with the rule that decided it">
+
+**Approvals are scoped to the action, not the surface.** "Always allow" on `git status` writes a rule
+about commands starting `git status`. The old version wrote a rule from the approval line alone, and
+every shell approval carried the same line — so one "Always" became standing permission to run
+anything. It does not any more, and there is a test for it.
+
+**Rules are sentences, or expressions when a sentence will not do it.** *"when a bot wants to read
+files from my Downloads folder → allow automatically"*, or
+`intent == "run_command" && contains(command, "npm publish")`. Deny is evaluated before allow, so a
+rule that removes permission can never be defeated by a broader one that grants it, and a rule that
+does not parse refuses rather than opens.
+
+**Smart review** asks the model about anything the local rules would wave through. The command
+reaches that reviewer with its comments stripped and inside a fence, and your rules reach it on the
+trusted channel, so a comment inside the command cannot argue its own way past the check. A review
+that cannot run fails closed.
+
+**Dry run** decides and records without blocking, so you can watch a new rule work on real work
+before it starts refusing things. The floor still refuses in both modes.
+
+<img src="docs/screenshots/settings.png" width="900" alt="Settings: reply language, execution on your computer, auto-review, review depth, dry run">
 
 ## Architecture
 
@@ -192,7 +158,7 @@ flowchart LR
   end
   subgraph MAIN["electron/ · main process"]
     W["window · IPC · tray"]
-    B["the bot's Chromium<br/>snapshot + ref"]
+    B["the bot's Chromium<br/>snapshot + ref, one session each"]
     H["webhook listener<br/>127.0.0.1"]
   end
   subgraph HOST["host/ · the agent runtime"]
@@ -221,9 +187,10 @@ flowchart LR
   R -->|"OpenAI-compatible"| LLM(["your model server"])
 ```
 
-Every tool call goes through **one** gate. It summarises the action, asks the policy for a verdict,
-optionally asks the model for a second opinion, writes the audit row, and only then executes — the
-main loop and background workers alike, so there is exactly one place where permission is decided.
+Every tool call goes through **one** gate — the main loop and background workers alike. It
+summarises the action, asks the policy for a verdict, optionally asks the model for a second
+opinion, writes the audit row, and only then executes. There is no path that acts without the record
+existing first.
 
 ```
 electron/   main process: window, IPC, the bot's browser, teach recorder, webhook listener
@@ -232,35 +199,35 @@ host/       agent runtime: store, provider, tools, policy, memory, skills, subag
 src/        renderer: React
 native/     halo-box — a Rust helper that runs a box command at Low integrity in a job object
 android/    the phone build: core/ ports host/, platform/ replaces electron/, ui/ follows src/
-docs/       the teardowns this was built from, and the record of every pass over it
+docs/       the reference teardowns, and the record of every pass over this code
 ```
 
----
+**Stack:** TypeScript · Electron 38 · React 19 · Vite · Kotlin · Jetpack Compose · Rust (one helper)
+· Model Context Protocol · AG-UI. No database, no server, no framework in the runtime.
 
 ## Verification
 
-```bash
-npm run typecheck                              # tsc, clean
-npm test                                       # 52 tests, node's runner, no framework
-npm run verify                                 # 18 checks, the whole loop end to end
-cd android && ./gradlew :app:testDebugUnitTest # 42 tests on the JVM
-```
+| Command | What it checks |
+|---|---|
+| `npm run typecheck` | `tsc` across the desktop app and the shared runtime |
+| `npm test` | 53 tests on node's own runner. No framework, no fixtures |
+| `npm run verify` | 19 checks driving the **real** runtime end to end |
+| `cd android && ./gradlew :app:testDebugUnitTest` | 43 tests on the JVM |
 
 `npm run verify` is the interesting one. It starts an OpenAI-compatible server on loopback that plays
 a **scripted** sequence of tool calls, builds a store and a runner in a temp directory, and drives the
 real loop — because asking a real model to attempt a disk wipe tests whether *that model* is willing,
-and a well-behaved one refuses on its own and never reaches the floor at all.
+and a well-behaved one refuses on its own and never reaches the floor at all. What has to hold is
+Halo's behaviour when the model is not well behaved.
 
 ```
 A turn, end to end
   PASS  SendMessage is the only channel, and it reaches the transcript
   PASS  a command on the user's machine stops at the approval gate
   PASS  what a tool brought back reaches the model fenced
-  PASS  Halo's own answer about its own state is not fenced
 The trail
   PASS  a gated action leaves a row
   PASS  the row names who decided it and how
-  PASS  a box command is on the trail too, not only the gated ones
 The floor, with every switch turned the wrong way
   PASS  refused: Remove-Item C:\ -Recurse -Force
   PASS  refused: powershell -Command "Remove-Item C:\ -Recurse -Force"
@@ -271,62 +238,40 @@ Background work
   PASS  the worker's report comes back fenced — a report is a model repeating what it read
 ```
 
-The desktop and Android suites deliberately contain **the same tests in two languages**: a property
-that holds on Windows and not on the phone is a bug in whichever half is wrong, and these say which.
-
----
+The desktop and Android suites deliberately hold **the same tests in two languages**: a property that
+holds on Windows and not on the phone is a bug in whichever half is wrong, and these say which.
 
 ## Making a bot
 
 **Ctrl+N**, or **+** in the sidebar. A name is the only required field.
 
-- **A template** fills the whole bot — role, brief and a voice that suits the job. Nine of them,
-  from Scout to Tutor to Build Bot.
-- **A voice.** Colleague, Terse, Warm, Mentor, Analyst, Deadpan, Pirate, Сеньор, or one you write.
+- **A template** fills the whole bot — role, brief, colour and a voice that suits the job. Nine of
+  them, from Scout to Tutor to Build Bot. A template fills the form rather than creating outright,
+  because a template you cannot adjust is a menu rather than a starting point.
+- **A voice** — Colleague, Terse, Warm, Mentor, Analyst, Deadpan, Pirate, Сеньор, or one you write.
   A voice changes how a bot sounds and nothing else: it cannot widen what the bot may do, switch off
-  an approval prompt, or make a refused action allowed — and the prompt says so to the model as well
+  an approval prompt, or make a refused action allowed, and the prompt says so to the model as well
   as to you.
-- **A model.** The global one, or a different one for this bot alone. A heavy bot can run a bigger
-  model than a watcher, and its background workers run on the same one it does.
+- **A model** — the global one, or a different one for this bot alone. Its background workers run on
+  the same one it does.
 
-### Teach it a task
-
-Open a bot's computer, press **Teach a task**, do the thing once, press stop. Halo records the real
-clicks, typing and navigations and the bot saves it as a skill with the selectors intact. Passwords
-are never recorded — a password field is captured as `<secret>`.
-
-The skill is the *shape* of the task, not a replay: anything that would differ next time becomes a
-named input written `{like_this}`, with the demonstrated value kept as the example. It ends with a
-line naming what it will not do on its own — pay, buy, or send on your behalf — and the bot offers a
-dry run so you can watch it once before it matters.
-
-### Per-bot permissions
-
-| | |
-|---|---|
-| **On your computer** | `Use global / Ask every time / Allow / Never`, for that bot alone |
-| **Folders it may use freely** | real folders; inside them nothing asks, outside them everything does |
-| **Model** | its own, overriding the global default |
-| **Browser session** | its own cookie jar, deleted with the bot |
-
----
+Its settings pane carries its own permissions: `Use global / Ask every time / Allow / Never` for your
+computer, the folders it may use freely, its model, and its own browser session.
 
 ## Android
 
 The same product on a phone, as a Kotlin/Compose **port** rather than a wrapper: same bots, same
 memory, same routines, same approval gate and audit trail, and the same layout on disk — a bot
-exported on Windows imports on the phone with its voice, memory, skills and routines intact.
+exported on Windows imports on the phone with its voice, memory, skills and routines intact, and back
+again.
 
 Four things the platform decided differently, and they are all in Halo's favour except the last: the
 box is a real sandbox rather than a folder with a label, so `ExternalShell` is gone and there is
 nothing for it to escape into; the folders a bot may use are grants Android itself holds rather than
-paths Halo polices; the browser is a WebView in the details pane with the same snapshot-and-ref
-contract; and plugins are remote MCP servers over Streamable HTTP, because a phone cannot spawn an
-npm package.
+paths Halo polices; the browser is a WebView with the same snapshot-and-ref contract; and plugins are
+remote MCP servers over Streamable HTTP, because a phone cannot spawn an npm package.
 
 The whole list is in **[docs/ANDROID.md](docs/ANDROID.md)**.
-
----
 
 ## Keyboard
 
@@ -336,8 +281,6 @@ The whole list is in **[docs/ANDROID.md](docs/ANDROID.md)**.
 | `Ctrl+N` | New bot |
 | `Enter` / `Shift+Enter` | Send / newline |
 | Right-click a bot | Pin, move to section, duplicate, export, hide, delete |
-
----
 
 ## Under the hood
 
@@ -349,54 +292,50 @@ The whole list is in **[docs/ANDROID.md](docs/ANDROID.md)**.
   run for weeks.
 - Memory extraction, safety review and summarising all use a cheap **helper model**, keeping the main
   one free for work.
-- Past eight plugin tools the schemas stop travelling in every prompt: the bot gets `ListPluginTools`
-  and `CallPluginTool` and looks them up on demand, which is what keeps a small local model's window
-  usable.
-- A shell command sees an **allow-list** of environment variables — PATH, locale, proxy — and not this
-  process's environment, so `Get-ChildItem env:` cannot print what the app decrypted at boot.
 - Everything is files: `settings.json`, `channels.json`, `routines.json`, `usage.jsonl`,
   `audit.jsonl`, and one folder per bot with its transcript, model history, memory, skills and box.
-- The API key, plugin credentials and any endpoint header are encrypted with the OS keychain
-  (`safeStorage`) or the Android keystore before they reach disk. Everything else stays readable.
-- A bot can also be **somebody else's agent**: give it an AG-UI endpoint and its turns run there, on
-  any framework — offered Halo's toolset, with every call coming back through the same gate and onto
-  the same trail. Hosting a foreign agent is not the same as trusting it.
-
----
+  A file that will not parse is moved aside rather than silently replaced by an empty one.
+- Closing the window keeps the bots running in the tray; quit from the tray to stop everything.
 
 ## Not done yet
 
 - **OAuth for hosted MCP servers** — Linear, Notion, Jira, Asana, Canva, Sentry, Vercel, PayPal,
   Square and Intercom publish servers that sign you in through a browser. Halo sends one static
   credential per server, so those are named as unsupported rather than listed and then failing.
-- **One cookie jar on Android.** `CookieManager` is a singleton over the WebView data directory, so
+- **One cookie jar on Android** — `CookieManager` is a singleton over the WebView data directory, so
   per-bot sessions there need a second process.
 - **On-device inference on Android** — the model is always something Halo talks to over the network.
 - **Reordering sidebar sections by dragging.**
-
----
 
 ## Documentation
 
 | | |
 |---|---|
-| [docs/GROK_BOT_TEARDOWN.md](docs/GROK_BOT_TEARDOWN.md) | the original at 0.18: tools, prompt, model of working |
-| [docs/GROK_BOT_INTERNALS.md](docs/GROK_BOT_INTERNALS.md) | its runtime, unpacked |
-| [docs/GROK_BOT_0.24_0.27_TEARDOWN.md](docs/GROK_BOT_0.24_0.27_TEARDOWN.md) | what changed by 0.24 and 0.27, including the move to the cloud |
-| [docs/OPENBOT_HERMES_TEARDOWN.md](docs/OPENBOT_HERMES_TEARDOWN.md) | the two MIT projects the floor, the trail and the retry policy come from |
 | [docs/ANDROID.md](docs/ANDROID.md) | the phone build and every deliberate divergence |
 | [docs/WORK_2026_08_27.md](docs/WORK_2026_08_27.md) | making the two builds one product |
-| [docs/WORK_2026_09_03.md](docs/WORK_2026_09_03.md) | the fence's back door, the gate's race, and eight other defects |
+| [docs/WORK_2026_09_03.md](docs/WORK_2026_09_03.md) | ten defects, an end-to-end harness, and what the field taught |
+| [docs/GROK_BOT_TEARDOWN.md](docs/GROK_BOT_TEARDOWN.md) · [INTERNALS](docs/GROK_BOT_INTERNALS.md) · [0.24→0.27](docs/GROK_BOT_0.24_0.27_TEARDOWN.md) | reference teardowns |
+| [docs/OPENBOT_HERMES_TEARDOWN.md](docs/OPENBOT_HERMES_TEARDOWN.md) | the MIT projects parts of this are adapted from |
+| [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) | how to work on it, how to report a hole |
 
----
+## Where it comes from
+
+Halo Bot is built by studying products that got something right and porting the *decision*, with the
+reasoning written down beside the code. `docs/` holds those teardowns, and the source cites them at
+the point of use — the odd-looking choices here are deliberate ports, not accidents.
+
+The shape of the product — named bots with a computer, a schedule and an approval gate — follows
+xAI's Grok Bot, torn down at versions 0.18, 0.24 and 0.27. In 0.27 that product moved its agent
+runtime off the desktop and onto its own servers; this one stayed local, which is the whole reason it
+exists in this form.
+
+The approval floor, the audit trail's decide-record-act ordering, the browser snapshot, the
+take-the-wheel state, the retry policy and the routine floor, cap and fatigue rule are ports of
+decisions — and in a few places of logic — from two MIT-licensed projects,
+[OpenBot](https://github.com/CopilotKit/OpenBot) by CopilotKit and
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. Both are named at the
+point of use in the source; the full attribution is in [NOTICE](NOTICE).
 
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
-
-Halo Bot is a clone of the *model of working* Grok Bot introduced, built from a teardown of that
-product rather than from its code. Parts of the approval floor, the audit trail, the browser snapshot,
-the take-the-wheel state and the retry policy are ports of decisions — and in a few places of logic —
-from two MIT-licensed projects, [OpenBot](https://github.com/CopilotKit/OpenBot) and
-[Hermes Agent](https://github.com/NousResearch/hermes-agent). Both are named at the point of use in
-the source; the full attribution is in [NOTICE](NOTICE).

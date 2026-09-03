@@ -101,11 +101,33 @@ export class Store {
     return readdirSync(this.agentsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
   }
 
+  /**
+   * Reads a JSON file, and never turns a bad read into a silent permanent loss.
+   *
+   * The fallback is what keeps the app usable when a file cannot be parsed — but every one of these
+   * files is also written back later, so a single unreadable read used to mean the next write
+   * overwrote the real data with an empty list, and the only copy was gone. A file that exists and
+   * will not parse is moved aside instead: the app starts from the fallback exactly as before, the
+   * bytes are still on disk under `<name>.corrupt-<timestamp>`, and the next write lands on a name
+   * that is no longer holding anybody's data.
+   */
   private readJson<T>(path: string, fallback: T): T {
+    if (!existsSync(path)) return fallback;
+    let raw: string;
     try {
-      if (!existsSync(path)) return fallback;
-      return JSON.parse(readFileSync(path, 'utf8')) as T;
+      raw = readFileSync(path, 'utf8');
     } catch {
+      // Locked or unreadable right now, which is not the same as damaged: leave it alone.
+      return fallback;
+    }
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      try {
+        renameSync(path, `${path}.corrupt-${Date.now()}`);
+      } catch {
+        /* nothing more to do; the fallback still keeps the app running */
+      }
       return fallback;
     }
   }

@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.halo.bot.Halo
 import com.halo.bot.core.Agent
+import com.halo.bot.core.clampTrigger
 import com.halo.bot.core.Routine
 import com.halo.bot.core.RoutineTrigger
 import com.halo.bot.core.describeTriggers
@@ -399,7 +400,7 @@ private fun RoutineEditor(model: HaloViewModel, routine: Routine, onDismiss: () 
     fun trigger(): RoutineTrigger {
         val (h, m) = time.split(":").let { (it.getOrNull(0)?.toIntOrNull() ?: 9) to (it.getOrNull(1)?.toIntOrNull() ?: 0) }
         return when (kind) {
-            "interval" -> RoutineTrigger(kind = "interval", everyMinutes = minutes.toIntOrNull()?.coerceAtLeast(1) ?: 60)
+            "interval" -> clampTrigger(RoutineTrigger(kind = "interval", everyMinutes = minutes.toIntOrNull() ?: 60))
             "webhook" -> RoutineTrigger(kind = "webhook", token = token)
             "weekly" -> RoutineTrigger(kind = "weekly", weekday = weekday, hour = h, minute = m)
             "weekdays" -> RoutineTrigger(kind = "weekdays", hour = h, minute = m)

@@ -11,6 +11,8 @@ import type { SkillStore } from './skills.ts';
 import { REFERENCE_DIR, referenceFiles } from './reference.ts';
 import { listModels } from './provider.ts';
 import { activateWorkflow, getWorkflow, listExecutions, listWorkflows, probeN8n, runWorkflow, saveWorkflow } from './n8n.ts';
+// Type-only on the way back (scheduler imports Runner as a type), so this is not a runtime cycle.
+import { clampTrigger, enabledSlot, MIN_INTERVAL_MINUTES } from './scheduler.ts';
 import type { Widget } from './types.ts';
 
 export interface ComputerPort {
@@ -786,7 +788,7 @@ export const TOOLS: Tool[] = [
         properties: {
           name: { type: 'string' },
           prompt: { type: 'string' },
-          every_minutes: { type: 'number' },
+          every_minutes: { type: 'number', description: `Minutes between runs. ${MIN_INTERVAL_MINUTES} is the shortest Halo allows; anything less is raised to it.` },
           daily_at: { type: 'string', description: 'HH:MM, 24h' },
           weekdays_at: { type: 'string', description: 'HH:MM, Monday to Friday only' },
           weekly_on: { type: 'string', description: 'e.g. "mon 09:00"' },
@@ -803,6 +805,8 @@ export const TOOLS: Tool[] = [
     async run(ctx, args) {
       const trigger = parseTrigger(args);
       if (!trigger) return { output: 'Give one of every_minutes, daily_at, weekdays_at, weekly_on, or webhook: true.', isError: true };
+      const slot = enabledSlot(ctx.store.listRoutines());
+      if (!slot.ok) return { output: `${slot.reason} Tell the user, and offer to switch one off.`, isError: true };
       const routine: Routine = {
         id: randomUUID(),
         agentId: ctx.agentId,
@@ -1288,7 +1292,10 @@ export function parseTrigger(args: Record<string, unknown>): RoutineTrigger | nu
   // A webhook routine waits to be called rather than watching the clock; the token is its whole address,
   // so it is generated here and never taken from the model.
   if (args.webhook === true) return { kind: 'webhook', token: randomUUID().replace(/-/g, '') };
-  if (typeof args.every_minutes === 'number' && args.every_minutes > 0) return { kind: 'interval', everyMinutes: args.every_minutes };
+  // The floor is applied here rather than trusted to the caller: this is the path a model writes.
+  if (typeof args.every_minutes === 'number' && args.every_minutes > 0) {
+    return clampTrigger({ kind: 'interval', everyMinutes: args.every_minutes });
+  }
 
   const weekdays = str(args.weekdays_at);
   if (/^\d{1,2}:\d{2}$/.test(weekdays)) {

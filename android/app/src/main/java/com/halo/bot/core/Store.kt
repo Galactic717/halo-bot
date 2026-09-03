@@ -59,10 +59,32 @@ class Store(val root: File, private val secrets: SecretCodec? = null) {
     fun boxDir(id: String): File = File(agentDir(id), "box")
     private fun transcriptPath(id: String) = File(agentDir(id), "transcript.jsonl")
 
-    private fun <T> readJson(path: File, serializer: kotlinx.serialization.KSerializer<T>): T? = try {
-        if (path.exists()) HaloJson.decodeFromString(serializer, path.readText()) else null
-    } catch (_: Exception) {
-        null
+    /**
+     * Reads a JSON file, and never turns a bad read into a silent permanent loss.
+     *
+     * The null fallback is what keeps the app usable when a file cannot be parsed — but every one of
+     * these files is also written back later, so a single unreadable read used to mean the next write
+     * overwrote the real data with an empty list, and the only copy was gone. A file that exists and
+     * will not parse is moved aside instead: the app starts empty exactly as before, the bytes are
+     * still on disk under a `.corrupt-<timestamp>` name, and the next write lands on a name that is
+     * no longer holding anybody's data.
+     */
+    private fun <T> readJson(path: File, serializer: kotlinx.serialization.KSerializer<T>): T? {
+        if (!path.exists()) return null
+        val raw = try {
+            path.readText()
+        } catch (_: Exception) {
+            // Locked or unreadable right now, which is not the same as damaged: leave it alone.
+            return null
+        }
+        return try {
+            HaloJson.decodeFromString(serializer, raw)
+        } catch (_: Exception) {
+            runCatching {
+                path.renameTo(File(path.parentFile, path.name + ".corrupt-" + System.currentTimeMillis()))
+            }
+            null
+        }
     }
 
     /** Write-then-rename: a crash mid-write leaves the old file intact instead of a half-written one. */

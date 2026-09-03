@@ -771,6 +771,16 @@ export class Runner implements RunnerPort {
     let widgetSent = false;
     /** One compaction per turn: a second overflow means the tail alone does not fit, and looping would not help. */
     let compactedForOverflow = false;
+    /*
+     * Whether the activity record is currently carrying streamed text.
+     *
+     * A flag rather than a look at `activity.text`, because `Store.updateMessage` replaces the object
+     * in its list instead of mutating it: the local `activity` reference keeps the empty string it was
+     * created with no matter how much text is written to the stored record. The clearing below tested
+     * that reference, so it never once fired, and every turn that both streamed text and called
+     * SendMessage put the same paragraph in the transcript twice.
+     */
+    let activityHasText = false;
     /** What the bot actually told the user, so a routine can be fed its own last report. */
     let lastDelivered = '';
     /** How much of the request the server admitted it read, used to spot a truncating context window. */
@@ -906,6 +916,7 @@ export class Runner implements RunnerPort {
         if (result.text.trim()) {
           const a = ensureActivity();
           this.store.updateMessage(target, a.id, { text: result.text });
+          activityHasText = true;
         }
 
         this.store.appendLlm(historyId, {
@@ -989,10 +1000,10 @@ export class Runner implements RunnerPort {
        * actually delivered something, the preview has served its purpose: the tool cards stay on the
        * activity record and the text comes off it.
        */
-      if (deliveredSomething && activity && (activity as Message).text.trim().length > 0) {
+      if (deliveredSomething && activity && activityHasText) {
         const record = activity as Message;
         this.store.updateMessage(target, record.id, { text: '' });
-        record.text = '';
+        activityHasText = false;
         this.emitEvent({ type: 'message.patch', agentId: target, messageId: record.id, text: '' });
       }
 

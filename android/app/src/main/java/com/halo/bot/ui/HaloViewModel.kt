@@ -10,6 +10,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.halo.bot.Halo
 import com.halo.bot.core.Agent
+import com.halo.bot.core.clampTriggers
+import com.halo.bot.core.enabledSlotReason
 import com.halo.bot.core.AgentStatus
 import com.halo.bot.core.ApprovalDecision
 import com.halo.bot.core.ApprovalRequest
@@ -209,7 +211,15 @@ class HaloViewModel : ViewModel() {
     }
 
     fun saveRoutine(routine: Routine) {
-        Halo.store.saveRoutine(routine)
+        // The interval floor and the enabled cap apply to the editor as they do to a bot writing one:
+        // one field that means two different things depending on who filled it in is worse than one rule.
+        val clamped = routine.copy(triggers = clampTriggers(routine.triggers))
+        val blocked = if (clamped.enabled) enabledSlotReason(Halo.store.listRoutines(), clamped.id) else null
+        if (blocked != null) {
+            Halo.store.saveRoutine(clamped.copy(enabled = false))
+        } else {
+            Halo.store.saveRoutine(clamped)
+        }
         routines = Halo.store.listRoutines()
     }
 

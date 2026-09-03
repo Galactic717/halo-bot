@@ -41,6 +41,7 @@ import { checkEndpoint } from './agui.ts';
 import { FENCE_TAG, fenceContent, fenceRules, fenceToolResult } from './fence.ts';
 import { parseTrigger, describeTrigger, TOOLS_BY_NAME } from './tools.ts';
 import { DEFAULT_SETTINGS } from './store.ts';
+import type { RoutineTrigger } from './types.ts';
 import { mentionedNames } from './mentions.ts';
 import { buildPortableBot, parsePortableBot } from './portable.ts';
 import { compactHistory, estimateTokens } from './compaction.ts';
@@ -48,7 +49,7 @@ import { classifyProviderError, describeFailure, listModels, providerFor, rankMo
 import { MCP_CATALOG } from './catalog.ts';
 import { missingFields, specArgs } from './mcp.ts';
 import { PLUGIN_CATEGORIES, SHELF_LIMIT, fuzzyScore, parseMcpConfig, shelves } from './plugins.ts';
-import { NEVER } from './scheduler.ts';
+import { NEVER, MAX_ENABLED_ROUTINES, MIN_INTERVAL_MINUTES, clampTrigger, clampTriggers, enabledSlot } from './scheduler.ts';
 import { PERSONAS, languageSection, personaSection, REPLY_LANGUAGES } from './personas.ts';
 import { n8nRoot } from './n8n.ts';
 import { buildSystemPrompt } from './prompt.ts';
@@ -915,4 +916,38 @@ test('a deleted bot leaves nothing behind that can bring it back', () => {
   assert.deepEqual(store.llmHistory(agent.id), []);
   assert.deepEqual(store.llmHistory(agent.id, 'room-1'), []);
   assert.equal(existsSync(store.agentDir(agent.id)), false);
+});
+
+test('a routine cannot be talked into firing every minute, and a room only holds so many', () => {
+  // OpenBot's floor, for OpenBot's reason: a model can be talked into anything a sentence can
+  // describe, and the floor is what a sentence cannot talk its way past.
+  const minutes = (t: RoutineTrigger | null) => (t && t.kind === 'interval' ? t.everyMinutes : -1);
+  assert.equal(minutes(clampTrigger({ kind: 'interval', everyMinutes: 1 })), MIN_INTERVAL_MINUTES);
+  assert.equal(minutes(clampTrigger({ kind: 'interval', everyMinutes: 0 })), MIN_INTERVAL_MINUTES);
+  // Above the floor a person's own number is theirs.
+  assert.equal(minutes(clampTrigger({ kind: 'interval', everyMinutes: 90 })), 90);
+  // The model's own path is clamped, not just the editor's.
+  assert.equal(minutes(parseTrigger({ every_minutes: 2 })), MIN_INTERVAL_MINUTES);
+  // Nothing else is touched.
+  const daily = { kind: 'daily' as const, hour: 9, minute: 0 };
+  assert.deepEqual(clampTriggers([daily, { kind: 'interval', everyMinutes: 3 }]), [
+    daily,
+    { kind: 'interval', everyMinutes: MIN_INTERVAL_MINUTES },
+  ]);
+
+  // The cap counts what is switched on, not what exists.
+  const routine = (i: number, enabled: boolean) => ({
+    id: `r${i}`,
+    agentId: 'a',
+    name: `r${i}`,
+    prompt: '',
+    triggers: [daily],
+    enabled,
+    createdAt: 0,
+  });
+  const full = Array.from({ length: MAX_ENABLED_ROUTINES }, (_, i) => routine(i, true));
+  assert.equal(enabledSlot(full).ok, false);
+  assert.equal(enabledSlot([...full.slice(1), routine(99, false)]).ok, true);
+  // Saving a change to one that is already on must not count it against itself.
+  assert.equal(enabledSlot(full, 'r0').ok, true);
 });

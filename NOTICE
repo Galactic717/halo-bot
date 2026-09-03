@@ -32,6 +32,7 @@ OpenBot — https://github.com/CopilotKit/OpenBot
   OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   Used in: host/policy.ts (intent taxonomy, deny-before-allow, neutral field binding, dry-run),
+  host/scheduler.ts (the interval floor, the cap on switched-on routines, the fatigue rule),
   host/audit.ts and host/runner.ts (decide-record-act ordering, the separate failure row),
   host/expression.ts (the case for an expression language over a rule table),
   host/tools.ts (shell environment allow-list),

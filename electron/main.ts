@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, copyFi
 import { randomUUID } from 'node:crypto';
 import { Store } from '../host/store';
 import { Runner } from '../host/runner';
-import { Scheduler, nextRun } from '../host/scheduler';
+import { Scheduler, clampTriggers, enabledSlot, nextRun } from '../host/scheduler';
 import { Computer } from './computer';
 import { buildPortableBot, parsePortableBot } from '../host/portable';
 import { McpManager, type McpServerSpec } from '../host/mcp';
@@ -441,15 +441,18 @@ function registerIpc() {
       weekdays_at: (input as Record<string, unknown>).weekdays_at,
       weekly_on: (input as Record<string, unknown>).weekly_on,
     });
-    const triggers = input.triggers?.length ? input.triggers : fromArgs ? [fromArgs] : [];
+    const triggers = clampTriggers(input.triggers?.length ? input.triggers : fromArgs ? [fromArgs] : []);
     if (triggers.length === 0) return null;
+    // The cap counts what is on, not what exists, and does not count this routine against itself.
+    const enabled = input.enabled ?? true;
+    if (enabled && !enabledSlot(store.listRoutines(), input.id).ok) return null;
     const routine: Routine = {
       id: input.id ?? randomUUID(),
       agentId: input.agentId,
       name: input.name,
       prompt: input.prompt,
       triggers,
-      enabled: input.enabled ?? true,
+      enabled,
       createdAt: input.createdAt ?? Date.now(),
       nextRunAt: nextRun({ triggers }),
       ...(input.runs ? { runs: input.runs } : {}),
