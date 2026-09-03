@@ -7,6 +7,7 @@ import type { McpServerSpec } from './mcp.ts';
  */
 export const PLUGIN_CATEGORIES = [
   'Agent Orchestration',
+  'Automation',
   'Canvas',
   'Customer Support',
   'Data Analytics',
@@ -127,4 +128,88 @@ export function filterInstalled(installed: McpServerSpec[], query: string): McpS
     .filter((row) => row.score > 0)
     .sort((a, b) => b.score - a.score || a.spec.name.localeCompare(b.spec.name))
     .map((row) => row.spec);
+}
+
+/**
+ * One server, as a pasted config describes it.
+ *
+ * WHY THIS EXISTS. Every MCP server on the internet documents itself the same way: a JSON snippet you
+ * drop into a client's config file. Asking somebody to read that snippet and retype its command, its
+ * arguments and its three environment variables into four separate boxes is the step where installing
+ * a plugin stops being worth it — and it is the step that makes "add absolutely anything" a slogan
+ * rather than a feature. Paste the snippet the vendor wrote and Halo reads it.
+ *
+ * WHAT IT ACCEPTS. The Claude Desktop shape (`{"mcpServers": {...}}`), the VS Code one
+ * (`{"servers": {...}}`), a bare map of names to definitions, and a single definition on its own.
+ * Both transports: a `command`/`args` server runs as a child process, and a `url` server is remote.
+ */
+export interface ParsedServer {
+  id: string;
+  name: string;
+  /** Set for a stdio server. */
+  command?: string;
+  args: string[];
+  env: Record<string, string>;
+  /** Set for a remote server, which the desktop bridges and the phone speaks to directly. */
+  url?: string;
+  headers: Record<string, string>;
+}
+
+function slugId(name: string): string {
+  return `custom-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`.slice(0, 60);
+}
+
+function readServer(name: string, raw: unknown): ParsedServer | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const command = typeof value.command === 'string' ? value.command.trim() : '';
+  // `url`, `serverUrl` and `httpUrl` all appear in the wild for the same field.
+  const url = ['url', 'serverUrl', 'httpUrl', 'endpoint']
+    .map((key) => (typeof value[key] === 'string' ? (value[key] as string).trim() : ''))
+    .find((v) => v.length > 0) ?? '';
+  if (!command && !url) return null;
+
+  const args = Array.isArray(value.args) ? value.args.filter((a): a is string => typeof a === 'string') : [];
+  const env: Record<string, string> = {};
+  for (const [key, v] of Object.entries((value.env as Record<string, unknown>) ?? {})) {
+    if (typeof v === 'string') env[key] = v;
+  }
+  const headers: Record<string, string> = {};
+  for (const [key, v] of Object.entries((value.headers as Record<string, unknown>) ?? {})) {
+    if (typeof v === 'string') headers[key] = v;
+  }
+  const label = typeof value.name === 'string' && value.name.trim() ? value.name.trim() : name;
+  return { id: slugId(label), name: label, ...(command ? { command } : {}), args, env, ...(url ? { url } : {}), headers };
+}
+
+/** Reads a pasted config. Returns an empty list and a reason rather than throwing. */
+export function parseMcpConfig(text: string): { servers: ParsedServer[]; error?: string } {
+  const trimmed = text.trim();
+  if (!trimmed) return { servers: [], error: 'Nothing to read.' };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (error) {
+    return { servers: [], error: `That is not valid JSON: ${String((error as Error).message).slice(0, 120)}` };
+  }
+  if (!parsed || typeof parsed !== 'object') return { servers: [], error: 'Expected a JSON object.' };
+
+  const root = parsed as Record<string, unknown>;
+  const map = (root.mcpServers ?? root.servers ?? root) as Record<string, unknown>;
+
+  // A single definition pasted on its own, rather than a map of them.
+  const single = readServer('Server', root);
+  if (single && (root.command || root.url || root.serverUrl || root.httpUrl || root.endpoint)) {
+    return { servers: [single] };
+  }
+
+  const servers: ParsedServer[] = [];
+  for (const [name, definition] of Object.entries(map ?? {})) {
+    const server = readServer(name, definition);
+    if (server) servers.push(server);
+  }
+  if (servers.length === 0) {
+    return { servers: [], error: 'No server in there had a command or a url. Paste the whole mcpServers block.' };
+  }
+  return { servers };
 }

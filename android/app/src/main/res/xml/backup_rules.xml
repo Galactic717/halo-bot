@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup is off in the manifest; this is here so turning it on later cannot quietly ship the
+     encrypted secrets to a different device, where the keystore key that opens them does not exist. -->
+<full-backup-content>
+    <exclude domain="file" path="settings.json" />
+</full-backup-content>

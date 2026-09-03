@@ -10,6 +10,8 @@ export interface SubagentRun {
   steps: string[];
   report: string;
   abort: AbortController;
+  /** Notes from the bot that dispatched it, read before the next step. See MessageSubagent. */
+  inbox: string[];
 }
 
 /** Each kind gets only the tools it needs — a narrow subagent is the one that does not wander. */
@@ -22,6 +24,8 @@ export const SUBAGENT_TOOLS: Record<SubagentKind, string[]> = {
 export function subagentSystemPrompt(kind: SubagentKind, parentName: string): string {
   const shared = [
     `You are a background worker dispatched by ${parentName}, a bot in Halo Bot.`,
+    `${parentName} can send you a correction while you work; it arrives as a new instruction and replaces`,
+    'anything it contradicts, without undoing what you have already done.',
     'You cannot talk to the user and cannot ask follow-up questions. Work from the task as written,',
     'make reasonable calls when something is ambiguous, and finish with a plain-text report of what you',
     'found or did — that report is the only thing that comes back. Keep it short and factual, and say',

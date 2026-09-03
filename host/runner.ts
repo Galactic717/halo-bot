@@ -4,7 +4,7 @@ import { extname } from 'node:path';
 import { MemoryStore, extractMemories } from './memory.ts';
 import { SkillStore } from './skills.ts';
 import { runShell } from './tools.ts';
-import { chat, classifyProviderError, describeFailure, ProviderError, type ChatMessage, type ToolSchema } from './provider.ts';
+import { chat, classifyProviderError, describeFailure, providerFor, ProviderError, type ChatMessage, type ToolSchema } from './provider.ts';
 import { buildSystemPrompt, REPLY_REMINDER } from './prompt.ts';
 import { decideDetailed, reviewWithModel, summarize, type Verdict } from './policy.ts';
 import { AuditLog } from './audit.ts';
@@ -13,7 +13,9 @@ import { TOOLS, TOOLS_BY_NAME, describeTriggers, type ComputerPort, type RunnerP
 import type { SubagentKind, SubagentRun } from './subagents.ts';
 import { mentionedNames } from './mentions.ts';
 import { compactHistory, estimateTokens } from './compaction.ts';
-import type { McpManager } from './mcp.ts';
+import { fenceContent, fenceToolResult } from './fence.ts';
+import { ensureReference } from './reference.ts';
+import { McpManager } from './mcp.ts';
 import { SUBAGENT_TOOLS, subagentSystemPrompt } from './subagents.ts';
 import type { Store } from './store.ts';
 import type { Agent, ApprovalDecision, ApprovalRequest, AuditRow, Channel, HaloEvent, Message, SystemEvent, ToolCallRecord, Widget } from './types.ts';
@@ -309,13 +311,16 @@ export class Runner implements RunnerPort {
 
   deliverToAgent(fromAgentId: string, toAgentId: string, text: string) {
     const from = this.store.getAgent(fromAgentId);
+    const name = from?.name ?? 'another bot';
     this.systemEvent(toAgentId, {
       kind: 'handoff',
       label: 'Message from',
-      chip: from?.name ?? 'another bot',
+      chip: name,
       ...(from ? { chipAgentId: from.id } : {}),
     });
-    this.enqueue(toAgentId, `[Message from ${from?.name ?? 'another bot'}]\n${text}`);
+    // A teammate is another model, which may itself have been talked into something by a page it read.
+    // Its message is outside content and arrives fenced, the same as anything a tool brought back.
+    this.enqueue(toAgentId, `[Message from ${name}]\n${fenceContent(`teammate:${name}`, text)}`);
   }
 
   /**
@@ -335,6 +340,7 @@ export class Runner implements RunnerPort {
       steps: [],
       abort,
       report: '',
+      inbox: [],
     };
     this.subagents.set(id, run);
     void this.runSubagent(parentAgentId, run, prompt);
@@ -392,11 +398,30 @@ export class Runner implements RunnerPort {
     return `Stopped ${id}.`;
   }
 
+  /**
+   * A correction to a worker that is already running, rather than a replacement for it.
+   *
+   * The original's `MessageSubagent` (docs/GROK_BOT_INTERNALS.md) exists because stopping a worker and
+   * dispatching a new one throws away everything it has already found — the pages it read, the files it
+   * wrote — to deliver one sentence. The note is picked up before the worker's next step, so it lands
+   * between two model calls rather than in the middle of one.
+   */
+  messageSubagent(id: string, text: string): string {
+    const run = this.subagents.get(id);
+    if (!run) return `No subagent called ${id}.`;
+    if (run.status !== 'running') return `${id} already finished (${run.status}). Its report is in your chat.`;
+    if (!text.trim()) return 'Give it something to act on.';
+    run.inbox.push(text.trim());
+    return `Passed on to ${id}. It reads this before its next step and keeps everything it has done so far.`;
+  }
+
   private async runSubagent(parentAgentId: string, run: SubagentRun, prompt: string) {
     const settings = this.store.getSettings();
     const allowed = SUBAGENT_TOOLS[run.kind];
     const tools = TOOLS.filter((t) => allowed.includes(t.schema.name));
     const agent = this.store.getAgent(parentAgentId);
+    // A worker dispatched by a bot runs on that bot's model, the same as the bot's own turns.
+    const provider = providerFor(settings.provider, agent);
 
     const ctx: ToolContext = {
       agentId: parentAgentId,
@@ -426,12 +451,20 @@ export class Runner implements RunnerPort {
     try {
       for (let step = 0; step < 14; step++) {
         if (run.abort.signal.aborted) break;
+        // A note from the parent lands between two model calls, never inside one.
+        for (const note of run.inbox.splice(0)) {
+          run.steps.push(`redirected: ${note.slice(0, 60)}`);
+          history.push({
+            role: 'user',
+            content: `[New instruction from ${agent?.name ?? 'the bot that dispatched you'}]\n${note}\nThis replaces anything it contradicts. Keep what you have already done.`,
+          });
+        }
         const startedAt = Date.now();
-        const result = await chat(settings.provider, history, tools.map((t) => t.schema), () => {}, run.abort.signal);
+        const result = await chat(provider, history, tools.map((t) => t.schema), () => {}, run.abort.signal);
         this.store.recordUsage({
           at: Date.now(),
           agentId: parentAgentId,
-          model: settings.provider.model,
+          model: provider.model,
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           seconds: Math.round((Date.now() - startedAt) / 100) / 10,
@@ -463,7 +496,7 @@ export class Runner implements RunnerPort {
             // A background worker is still this bot acting, so it goes through the same gate.
             const gate = await this.gate(parentAgentId, tool, call.args, run.abort.signal);
             const out = gate.allowed ? await tool.run(ctx, call.args) : { output: gate.output };
-            history.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: out.output });
+            history.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: fenceToolResult(call.name, out.output) });
           } catch (error) {
             history.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: `Failed: ${String((error as Error).message)}` });
           }
@@ -476,12 +509,31 @@ export class Runner implements RunnerPort {
     }
 
     if (run.abort.signal.aborted) return;
+    // The report is written by a model that has been reading web pages and files, so it is outside
+    // content like any other and comes back fenced. The description is Halo's own line and stays out
+    // of the fence, which is also what keeps the transcript chip readable.
     this.submitSystemTurn(
       parentAgentId,
-      `${run.description}\n\n${run.report || '(no report)'}`,
+      `${run.description}\n\n${fenceContent(`task:${run.id}`, run.report || '(no report)')}`,
       `Background task ${run.id} finished`,
       'note',
     );
+  }
+
+  /**
+   * Drops everything this process still holds for a bot, so deleting one is actually final.
+   *
+   * `rememberExchange` runs detached after a turn and calls `memory(agentId)`; a MemoryStore cached
+   * for a bot the user has just deleted recreates `agents/<id>/memory/` on its way past, and the bot
+   * comes back as an empty folder that survives the next restart.
+   */
+  forget(agentId: string) {
+    this.memories.delete(agentId);
+    this.skillStores.delete(agentId);
+    this.remoteState.delete(agentId);
+    this.channelHops.delete(agentId);
+    for (const [id, run] of [...this.subagents]) if (run.parentAgentId === agentId) this.subagents.delete(id);
+    for (const [id, entry] of [...this.background]) if (entry.agentId === agentId) this.background.delete(id);
   }
 
   memory(agentId: string): MemoryStore {
@@ -514,7 +566,7 @@ export class Runner implements RunnerPort {
       const tail = out.trim().split('\n').slice(-20).join('\n');
       this.submitSystemTurn(
         agentId,
-        `Background shell ${id} finished with exit ${code}.\nCommand: ${command}\nLast output:\n${tail}`,
+        `Background shell ${id} finished with exit ${code}.\nCommand: ${command}\nLast output:\n${fenceContent(`shell:${id}`, tail)}`,
         'Background command finished',
       );
     });
@@ -572,7 +624,13 @@ export class Runner implements RunnerPort {
   }
 
   private toolSchemas(): ToolSchema[] {
-    return [...TOOLS.map((t) => t.schema), ...(this.mcp?.toolSchemas() ?? [])];
+    const base = TOOLS.map((t) => t.schema);
+    const plugins = this.mcp?.toolSchemas() ?? [];
+    // A handful of plugin tools is cheaper to carry than to look up. A shelf of them is not: past the
+    // limit they turn into two meta-tools the bot calls on demand, which is what keeps the prompt
+    // inside a small local model's window.
+    if (plugins.length <= McpManager.INLINE_LIMIT) return [...base, ...plugins];
+    return [...base, ...(this.mcp?.metaSchemas() ?? [])];
   }
 
   /** Folds old turns into a summary so a long-running bot never outgrows its context. */
@@ -616,6 +674,8 @@ export class Runner implements RunnerPort {
   }
 
   private systemPrompt(agent: Agent, channelId?: string): string {
+    // Kept in step with the running version rather than with whatever version created the box.
+    ensureReference(this.store.boxDir(agent.id));
     const routines = this.store
       .listRoutines()
       .filter((r) => r.agentId === agent.id)
@@ -699,6 +759,15 @@ export class Runner implements RunnerPort {
     };
 
     let deliveredSomething = false;
+    /*
+     * Grok Bot 0.24 stopped treating "reply first" as advice and made the runtime count a delivery the
+     * turn owes (`sand_send_message_delivery_owed`, docs/GROK_BOT_0.24_0.27_TEARDOWN.md §3). The failure
+     * it catches is the expensive one: the bot does the work, then ends the turn with the result only in
+     * its own head. One nudge, once — a second would be a loop, and the system event below already tells
+     * the user when even that did not land.
+     */
+    let workedThisTurn = false;
+    let nudgedForDelivery = false;
     let widgetSent = false;
     /** One compaction per turn: a second overflow means the tail alone does not fit, and looping would not help. */
     let compactedForOverflow = false;
@@ -757,6 +826,7 @@ export class Runner implements RunnerPort {
       },
       startBackground: (command, cwd, confined) => this.startBackground(agentId, command, cwd, confined),
       awaitBackground: (id, timeoutMs) => this.awaitBackground(id, timeoutMs),
+      pluginStatus: () => this.mcp?.statuses() ?? [],
       systemEvent: (event) => {
         this.systemEvent(agentId, event);
       },
@@ -779,11 +849,14 @@ export class Runner implements RunnerPort {
 
         let streamed = '';
         const startedAt = Date.now();
-        const providerForAgent = agent.model ? { ...settings.provider, model: agent.model } : settings.provider;
+        const providerForAgent = providerFor(settings.provider, agent);
         const stream = (chunk: string) => {
           streamed += chunk;
           const a = ensureActivity();
-          this.emitEvent({ type: 'message.patch', agentId, messageId: a.id, text: streamed });
+          // `target`, not `agentId`: in a room the activity record belongs to the room's transcript,
+          // and a patch addressed to the bot's own id lands on a conversation that does not hold it,
+          // so nothing streamed ever appeared in a channel.
+          this.emitEvent({ type: 'message.patch', agentId: target, messageId: a.id, text: streamed });
         };
 
         let result;
@@ -850,6 +923,16 @@ export class Runner implements RunnerPort {
         }, historySuffix);
 
         if (result.toolCalls.length === 0) {
+          // Work happened but nothing was sent: the turn owes a message it never wrote.
+          if (!deliveredSomething && !nudgedForDelivery && workedThisTurn && !result.text.trim()) {
+            nudgedForDelivery = true;
+            this.store.appendLlm(historyId, {
+              role: 'user',
+              content:
+                'You finished the work but never called SendMessage, so the user has seen nothing at all. Send them the result now, in one or two short messages.',
+            }, historySuffix);
+            continue;
+          }
           // Model answered in plain text. That never reaches the user, so nudge it once.
           if (!deliveredSomething && result.text.trim()) {
             this.store.appendLlm(historyId, {
@@ -862,6 +945,7 @@ export class Runner implements RunnerPort {
           break;
         }
 
+        workedThisTurn = true;
         for (const call of result.toolCalls) {
           if (abort.signal.aborted) break;
           if (widgetSent && call.name === 'AskUser') {
@@ -878,7 +962,11 @@ export class Runner implements RunnerPort {
             continue;
           }
           const { output, imagePath } = await this.executeTool(ctx, ensureActivity, call, target);
-          this.store.appendLlm(historyId, { role: 'tool', tool_call_id: call.id, name: call.name, content: output }, historySuffix);
+          this.store.appendLlm(
+            historyId,
+            { role: 'tool', tool_call_id: call.id, name: call.name, content: fenceToolResult(call.name, output) },
+            historySuffix,
+          );
 
           // A screenshot is only useful if the model can actually see it.
           const dataUrl = imagePath && settings.provider.vision ? imageDataUrl(imagePath) : null;
@@ -890,6 +978,22 @@ export class Runner implements RunnerPort {
             );
           }
         }
+      }
+
+      /*
+       * The streaming preview is a preview, not a delivery.
+       *
+       * A model that writes "Done: X" as plain text and then calls SendMessage with the same line is
+       * doing what it was asked — SendMessage is the only channel — but the transcript ends up saying
+       * it twice, because the activity record kept the streamed text as well. Once the turn has
+       * actually delivered something, the preview has served its purpose: the tool cards stay on the
+       * activity record and the text comes off it.
+       */
+      if (deliveredSomething && activity && (activity as Message).text.trim().length > 0) {
+        const record = activity as Message;
+        this.store.updateMessage(target, record.id, { text: '' });
+        record.text = '';
+        this.emitEvent({ type: 'message.patch', agentId: target, messageId: record.id, text: '' });
       }
 
       if (!deliveredSomething && !abort.signal.aborted) {
@@ -1057,6 +1161,23 @@ export class Runner implements RunnerPort {
     attach({});
 
     if (!tool) {
+      // The two meta-tools that stand in for inlined plugin schemas. Listing is read-only; calling is
+      // routed straight into the plugin path below so it lands on the trail like any other plugin call.
+      if (this.mcp && call.name === 'ListPluginTools') {
+        const output = this.mcp.catalogue(typeof call.args.plugin === 'string' ? call.args.plugin : undefined);
+        attach({ status: 'done', endedAt: Date.now(), result: output.slice(0, 4000) });
+        return { output };
+      }
+      if (this.mcp && call.name === 'CallPluginTool') {
+        const name = typeof call.args.name === 'string' ? call.args.name : '';
+        const args = (call.args.arguments ?? {}) as Record<string, unknown>;
+        if (!this.mcp.isPluginTool(name)) {
+          const output = `${name || '(no name)'} is not a plugin tool. Call ListPluginTools and use a name from it.`;
+          attach({ status: 'error', endedAt: Date.now(), error: output });
+          return { output };
+        }
+        return this.executeTool(ctx, ensureActivity, { ...call, name, args }, transcriptId);
+      }
       if (this.mcp?.isPluginTool(call.name)) {
         // A plugin reaches somebody else's service with the user's credentials, so it belongs on the
         // trail beside everything else even though there is no local policy to decide it against.
@@ -1190,9 +1311,18 @@ export class Runner implements RunnerPort {
       id: randomUUID(),
       createdAt: Date.now(),
     };
-    this.emitEvent({ type: 'approval', approval: request });
+    /*
+     * Registered before it is announced, never the other way round.
+     *
+     * The old order emitted the card and only then, inside the promise executor, recorded who was
+     * waiting for the answer. That is safe for exactly one kind of listener: the renderer, which
+     * answers over IPC a tick later. Anything that answers synchronously — a test harness, a future
+     * auto-approve rule, a second window — calls `resolveApproval` while `approvals` is still empty,
+     * the decision is dropped on the floor, and the turn waits for an answer that already came.
+     */
     return new Promise<ApprovalDecision>((resolve) => {
       this.approvals.set(request.id, { request, resolve });
+      this.emitEvent({ type: 'approval', approval: request });
     });
   }
 }
@@ -1209,6 +1339,8 @@ function approvalQuestion(surface: ApprovalRequest['surface'], agentName: string
       return `Allow ${agentName} to use the browser for this?`;
     case 'shell':
       return `Allow ${agentName} to run this command?`;
+    case 'automation':
+      return `Allow ${agentName} to change your automations?`;
     default:
       return `Allow ${agentName} to make this change?`;
   }
@@ -1222,6 +1354,8 @@ function permissionPhrase(surface: ApprovalRequest['surface']): string {
       return 'read files from your computer';
     case 'file_write':
       return 'write files onto your computer';
+    case 'automation':
+      return 'change and run your automations';
     default:
       return 'do this without asking';
   }
@@ -1246,7 +1380,7 @@ export function commandPrefixOf(command: string): string {
 /**
  * Below this, a prompt cannot have carried Halo's instructions and its toolset.
  *
- * The system prompt is ~1500 tokens and the 34 tool schemas are a few thousand more, so a server
+ * The system prompt is ~1500 tokens and the 41 tool schemas are a few thousand more, so a server
  * that reports having read fewer than this truncated the request rather than answered it.
  */
 const PROMPT_FLOOR_TOKENS = 4200;

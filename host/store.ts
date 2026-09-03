@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: Settings = {
     imageModel: '',
   },
   theme: 'system',
+  replyLanguage: 'match',
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   localExecution: 'ask',
   autoReview: true,
@@ -30,6 +31,7 @@ export const DEFAULT_SETTINGS: Settings = {
   minimizeToTray: true,
   rules: [],
   webSearch: { enabled: true, endpoint: 'https://html.duckduckgo.com/html/?q=' },
+  n8n: { enabled: false, baseUrl: 'http://localhost:5678', apiKey: '' },
   plugins: [],
   sections: [],
 };
@@ -69,7 +71,12 @@ export class Store {
     mkdirSync(this.agentsDir, { recursive: true });
     this.settings = this.unseal(this.readJson(this.settingsPath, DEFAULT_SETTINGS));
     // merge so new setting keys appear after an upgrade
-    this.settings = { ...DEFAULT_SETTINGS, ...this.settings, provider: { ...DEFAULT_SETTINGS.provider, ...this.settings.provider } };
+    this.settings = {
+      ...DEFAULT_SETTINGS,
+      ...this.settings,
+      provider: { ...DEFAULT_SETTINGS.provider, ...this.settings.provider },
+      n8n: { ...DEFAULT_SETTINGS.n8n, ...(this.settings.n8n ?? {}) },
+    };
     // Seal on the first run that has a keychain, so a key written before this existed does not stay in the clear.
     if (this.secrets && existsSync(this.settingsPath)) this.writeJson(this.settingsPath, this.seal(this.settings));
     for (const r of this.readJson<Routine[]>(this.routinesPath, [])) this.routines.set(r.id, r);
@@ -113,7 +120,12 @@ export class Store {
   // ---- settings ----
   getSettings(): Settings { return this.settings; }
   saveSettings(next: Partial<Settings>): Settings {
-    this.settings = { ...this.settings, ...next, provider: { ...this.settings.provider, ...(next.provider ?? {}) } };
+    this.settings = {
+      ...this.settings,
+      ...next,
+      provider: { ...this.settings.provider, ...(next.provider ?? {}) },
+      n8n: { ...this.settings.n8n, ...(next.n8n ?? {}) },
+    };
     this.writeJson(this.settingsPath, this.seal(this.settings));
     return this.settings;
   }
@@ -123,6 +135,7 @@ export class Store {
     return {
       ...settings,
       provider: { ...settings.provider, apiKey: fn(settings.provider.apiKey) },
+      n8n: { ...settings.n8n, apiKey: fn(settings.n8n?.apiKey ?? '') },
       plugins: settings.plugins.map((plugin) =>
         plugin.env
           ? { ...plugin, env: Object.fromEntries(Object.entries(plugin.env).map(([k, v]) => [k, fn(v)])) }
@@ -175,6 +188,8 @@ export class Store {
       ...(source.model ? { model: source.model } : {}),
       ...(source.localExecution ? { localExecution: source.localExecution } : {}),
       ...(source.allowedPaths ? { allowedPaths: [...source.allowedPaths] } : {}),
+      ...(source.personaId ? { personaId: source.personaId } : {}),
+      ...(source.persona ? { persona: source.persona } : {}),
     });
     try {
       cpSync(join(this.agentDir(id), 'skills'), join(this.agentDir(copy.id), 'skills'), { recursive: true });
@@ -201,6 +216,8 @@ export class Store {
       ...(input.allowedPaths?.length ? { allowedPaths: [...input.allowedPaths] } : {}),
       ...(input.endpoint ? { endpoint: input.endpoint } : {}),
       ...(input.endpointAuth ? { endpointAuth: input.endpointAuth } : {}),
+      ...(input.personaId ? { personaId: input.personaId } : {}),
+      ...(input.persona ? { persona: input.persona } : {}),
       ...(input.pinned ? { pinned: true } : {}),
       ...(input.hidden ? { hidden: true } : {}),
     };
@@ -223,6 +240,9 @@ export class Store {
     this.dirty.delete(id);
     this.agents.delete(id);
     this.transcripts.delete(id);
+    // Its model history too, including the per-room copies. A cached one left behind would be written
+    // back out by the next append and recreate the folder this call is deleting.
+    for (const key of [...this.llm.keys()]) if (key === id || key.startsWith(`${id}#`)) this.llm.delete(key);
     for (const r of [...this.routines.values()]) if (r.agentId === id) this.routines.delete(r.id);
     this.saveRoutines();
     rmSync(this.agentDir(id), { recursive: true, force: true });

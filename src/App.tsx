@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { Chat } from './components/Chat';
 import { Details } from './components/Details';
 import { SettingsModal } from './components/SettingsModal';
-import { Onboarding } from './components/Onboarding';
+import { Onboarding, type NewBotInput } from './components/Onboarding';
 import { ComputerPane } from './components/ComputerPane';
 import { ChannelDetails } from './components/ChannelDetails';
 import { PluginsModal } from './components/PluginsModal';
@@ -228,12 +228,15 @@ export function App() {
     [activeId],
   );
 
-  const createAgent = useCallback(async (input: { name: string; color: string; title?: string; description?: string }) => {
+  const createAgent = useCallback(async (input: NewBotInput) => {
     const agent = await window.halo.createAgent({
       name: input.name,
       title: input.title ?? '',
       description: input.description ?? '',
       avatar: { color: input.color, face: 0 },
+      ...(input.personaId ? { personaId: input.personaId } : {}),
+      ...(input.persona ? { persona: input.persona } : {}),
+      ...(input.model ? { model: input.model } : {}),
     });
     setActiveId(agent.id);
     setCreating(false);
@@ -313,7 +316,12 @@ export function App() {
       />
 
       {showOnboarding ? (
-        <Onboarding onCreate={createAgent} canCancel={agents.length > 0} onCancel={() => setCreating(false)} />
+        <Onboarding
+          onCreate={createAgent}
+          canCancel={agents.length > 0}
+          onCancel={() => setCreating(false)}
+          defaultModel={settings.provider.model}
+        />
       ) : computer.visible && computer.agentId === activeId ? (
         <ComputerPane
           agentId={activeId!}
@@ -381,6 +389,14 @@ export function App() {
 
       {searchOpen && (
         <SearchModal
+          agents={agents}
+          routines={routines}
+          actions={[
+            { label: 'New bot', detail: 'Ctrl+N', run: () => setCreating(true) },
+            { label: 'Plugins', detail: 'MCP servers and skills', run: () => setPluginsOpen(true) },
+            { label: 'Settings', detail: 'Model, permissions, activity', run: () => setSettingsOpen(true) },
+            { label: 'About Halo Bot', run: () => setAboutOpen(true) },
+          ]}
           onClose={() => setSearchOpen(false)}
           onOpen={(id) => {
             setActiveId(id);

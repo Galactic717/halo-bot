@@ -35,6 +35,23 @@ interface SnapshotEntry {
 }
 
 const HOME = 'https://duckduckgo.com';
+
+/**
+ * One cookie jar per bot, not one for the app.
+ *
+ * Grok Bot puts every one of a user's bots on a single cloud computer, so its files, its browser
+ * sessions and its app logins are pooled at the account level — which means a bot given a narrow job
+ * can still reach every credential any other bot ever signed in with, and deleting a bot does not
+ * take its sessions with it. This build already gives each bot its own box and its own permissions;
+ * sharing one browser session across them put the same hole back in the one place it costs most.
+ *
+ * The price is real and worth naming: signing in to a site is now per bot rather than once for the
+ * app. That is the same trade as the box, and it is the one that makes "give a bot you do not trust
+ * `Never`" mean something.
+ */
+function partitionFor(agentId: string): string {
+  return `persist:halo-computer-${agentId}`;
+}
 /** Parked position: large enough to render a real page, far enough out to be invisible. */
 const OFFSCREEN: Rectangle = { x: -4000, y: 0, width: 1280, height: 800 };
 /** Layout width a shrunk preview still renders at. */
@@ -90,7 +107,7 @@ export class Computer implements ComputerPort {
     // parked off-canvas until it is shown. That is what makes the preview thumbnail real.
     const view = new WebContentsView({
       webPreferences: {
-        session: session.fromPartition('persist:halo-computer'),
+        session: session.fromPartition(partitionFor(agentId)),
         backgroundThrottling: false,
         sandbox: true,
         contextIsolation: true,
@@ -110,7 +127,14 @@ export class Computer implements ComputerPort {
         visible: this.visibleAgentId === agentId,
       });
     };
-    view.webContents.on('did-navigate', report);
+    // A page the bot has not looked at cannot have refs on it. Dropping the map here is what turns a
+    // ref cited after a click that navigated into "take a fresh snapshot" rather than into a click on
+    // whatever now sits at that ref.
+    const pageChanged = () => {
+      this.snapshots.delete(agentId);
+      report();
+    };
+    view.webContents.on('did-navigate', pageChanged);
     view.webContents.on('dom-ready', () => {
       if (this.teaching?.agentId === agentId) void injectRecorder(view.webContents);
     });
@@ -133,7 +157,7 @@ export class Computer implements ComputerPort {
     view.webContents.on('did-start-navigation', () => {
       if (this.teaching?.agentId === agentId) void this.drainTeaching(view.webContents);
     });
-    view.webContents.on('did-navigate-in-page', report);
+    view.webContents.on('did-navigate-in-page', pageChanged);
     view.webContents.on('page-title-updated', report);
     const screen: Screen = { view, attached: true, lastUsed: Date.now() };
     this.window.contentView.addChildView(view);
@@ -367,6 +391,11 @@ export class Computer implements ComputerPort {
    */
   async snapshot(agentId: string): Promise<string> {
     const wc = this.screen(agentId).view.webContents;
+    // Stamped into the attribute below, so a selector this snapshot wrote can never match a node a
+    // different snapshot marked. Without it, a single-page app that recycles a DOM node keeps last
+    // snapshot's `data-halo-ref` on a control whose label has since changed — and the approval card
+    // then names one button while the click lands on another.
+    const generation = ++this.generation;
     /*
      * The accessible name and role of everything on the page a person could act on.
      *
@@ -442,9 +471,10 @@ export class Computer implements ComputerPort {
         const name = nameOf(el);
         if (!name) continue;
         n += 1;
-        el.setAttribute('data-halo-ref', 'e' + n);
+        const tag = 'g${generation}e' + n;
+        el.setAttribute('data-halo-ref', tag);
         const state = el.checked === true ? ' [checked]' : el.getAttribute('aria-expanded') === 'true' ? ' [expanded]' : '';
-        out.push({ ref: 'e' + n, role: role + state, name: name.slice(0, 80), selector: '[data-halo-ref="e' + n + '"]' });
+        out.push({ ref: 'e' + n, role: role + state, name: name.slice(0, 80), selector: '[data-halo-ref="' + tag + '"]' });
         if (out.length >= 150) break;
       }
       return JSON.stringify({ url: location.href, title: document.title, elements: out });
@@ -455,14 +485,13 @@ export class Computer implements ComputerPort {
       title: string;
       elements: { ref: string; role: string; name: string; selector: string }[];
     };
-    this.generation += 1;
     this.snapshots.set(agentId, {
-      generation: this.generation,
+      generation,
       url: page.url,
       elements: new Map(page.elements.map((e) => [e.ref, e])),
     });
     const listed = page.elements.map((e) => `${e.ref}  ${e.role}  "${e.name}"`).join('\n');
-    return `# ${page.title}\n${page.url}\nsnapshot ${this.generation}\n\n${listed || '(no controls found)'}`;
+    return `# ${page.title}\n${page.url}\nsnapshot ${generation}\n\n${listed || '(no controls found)'}`;
   }
 
   /**
@@ -676,6 +705,38 @@ export class Computer implements ComputerPort {
     const image = await s.view.webContents.capturePage();
     if (image.isEmpty()) return null;
     return image.resize({ width: 480 }).toDataURL();
+  }
+
+  /**
+   * Everything this bot had in the browser, gone with the bot.
+   *
+   * Deleting a bot already removes its box, its transcript and its memory. Leaving its logins behind
+   * in a session store is the failure the per-bot partition exists to prevent, one step later:
+   * a deleted bot's cookies would otherwise sit on disk until the profile is wiped by hand.
+   */
+  async forget(agentId: string): Promise<void> {
+    const screen = this.screens.get(agentId);
+    if (screen) {
+      this.screens.delete(agentId);
+      try {
+        this.window.contentView.removeChildView(screen.view);
+        screen.view.webContents.close();
+      } catch {
+        /* already gone */
+      }
+    }
+    this.snapshots.delete(agentId);
+    this.control.delete(agentId);
+    if (this.visibleAgentId === agentId) this.visibleAgentId = null;
+    if (this.previewAgentId === agentId) {
+      this.previewAgentId = null;
+      this.previewBounds = null;
+    }
+    try {
+      await session.fromPartition(partitionFor(agentId)).clearStorageData();
+    } catch {
+      /* a partition that was never opened has nothing to clear */
+    }
   }
 
   dispose() {

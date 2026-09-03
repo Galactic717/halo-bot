@@ -293,7 +293,9 @@ function MessageView({
             </div>
           </div>
         )}
-        {message.widget && <WidgetCard widget={message.widget} onAnswer={onAnswer} />}
+        {message.widget && (
+          <WidgetCard widget={message.widget} conversationId={conversationId} messageId={message.id} onAnswer={onAnswer} />
+        )}
         {message.images && message.images.length > 0 && (
           <div className="message-images" data-count={message.images.length}>
             {message.images.map((image) => (
@@ -418,13 +420,26 @@ function ToolCard({ call }: { call: ToolCallRecord }) {
   );
 }
 
-function WidgetCard({ widget, onAnswer }: { widget: Widget; onAnswer: (value: string) => void }) {
+function WidgetCard({
+  widget,
+  conversationId,
+  messageId,
+  onAnswer,
+}: {
+  widget: Widget;
+  conversationId: string;
+  messageId: string;
+  onAnswer: (value: string) => void;
+}) {
   const [custom, setCustom] = useState('');
   const [answered, setAnswered] = useState(widget.answered ?? '');
 
   const pick = (value: string) => {
     if (answered) return;
     setAnswered(value);
+    // Written down, not only remembered: the pick lived in component state, so reopening the chat
+    // read the message back off disk with no answer on it and offered the buttons again.
+    void window.halo.answerWidget(conversationId, messageId, value);
     onAnswer(value);
   };
 

@@ -27,6 +27,18 @@ export function wireMessages(messages: ChatMessage[]): Record<string, unknown>[]
   });
 }
 
+/**
+ * The model one bot runs on: its own when it has one, the global default otherwise.
+ *
+ * One function rather than the same three lines at each call site — the second copy was in the
+ * subagent loop and had been written as "the global model", so a bot the user had deliberately put on
+ * a bigger model handed its background work to a smaller one.
+ */
+export function providerFor(provider: Settings['provider'], agent?: { model?: string } | null): Settings['provider'] {
+  const model = agent?.model?.trim();
+  return model ? { ...provider, model } : provider;
+}
+
 export interface ToolSchema {
   name: string;
   description: string;
@@ -100,7 +112,9 @@ export function describeFailure(reason: FailureReason, message: string): string 
     case 'model_unavailable':
       return `That model is not available on this server: ${message}`;
     case 'missing_config':
-      return 'The model is not configured. Pick one in Settings → Model.';
+      // Every missing_config message names the thing that is missing and the screen that fixes it,
+      // which is more use than a generic line about the model.
+      return message || 'The model is not configured. Pick one in Settings → Model.';
     case 'network':
       return 'The model server could not be reached.';
     default:
@@ -184,6 +198,23 @@ export async function chat(
   throw lastError;
 }
 
+/**
+ * The address every request is built from, checked once here rather than at four call sites.
+ *
+ * An empty or malformed address is a configuration mistake, not a network failure, and `fetch`
+ * reports it as "Failed to parse URL from /chat/completions" — which reads like a bug in Halo rather
+ * than an empty box in Settings. Raised as a ProviderError here it classifies as missing_config and
+ * says which screen fixes it.
+ */
+function endpoint(settings: Settings['provider'], path: string): string {
+  const base = settings.baseUrl.trim().replace(/\/+$/, '');
+  if (!base) throw new ProviderError('the model server address is not configured — set one in Settings → Model');
+  if (!/^https?:\/\//i.test(base)) {
+    throw new ProviderError(`the model server address is not configured correctly: "${base}" has to start with http:// or https://`);
+  }
+  return base + path;
+}
+
 async function chatOnce(
   settings: Settings['provider'],
   messages: ChatMessage[],
@@ -191,7 +222,7 @@ async function chatOnce(
   onDelta: (chunk: string) => void,
   signal?: AbortSignal,
 ): Promise<ChatResult> {
-  const url = `${settings.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const url = endpoint(settings, '/chat/completions');
   const body: Record<string, unknown> = {
     model: settings.model,
     messages: wireMessages(messages),
@@ -305,7 +336,7 @@ const HELPER_TIMEOUT_MS = 90_000;
  * Always bounded: a helper that hangs would otherwise wedge the turn that is waiting on it.
  */
 export async function complete(settings: Settings['provider'], messages: ChatMessage[], signal?: AbortSignal): Promise<string> {
-  const url = `${settings.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const url = endpoint(settings, '/chat/completions');
   const guard = new AbortController();
   const onAbort = () => guard.abort();
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -342,7 +373,7 @@ export interface ModelInfo {
  * to pick a model that actually fits the machine instead of the first one in the list.
  */
 export async function listModelsDetailed(settings: Settings['provider']): Promise<ModelInfo[]> {
-  const base = settings.baseUrl.replace(/\/+$/, '');
+  const base = endpoint(settings, '');
   if (/:11434(\/|$)/.test(base) || base.includes('11434')) {
     const root = base.replace(/\/v1$/, '');
     try {
@@ -379,7 +410,7 @@ export function rankModels(models: ModelInfo[], memoryBytes: number): ModelInfo[
 }
 
 export async function listModels(settings: Settings['provider']): Promise<string[]> {
-  const url = `${settings.baseUrl.replace(/\/+$/, '')}/models`;
+  const url = endpoint(settings, '/models');
   const res = await fetch(url, { headers: settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {} });
   if (!res.ok) throw new ProviderError(`${res.status} ${res.statusText}`, res.status);
   const json: any = await res.json();

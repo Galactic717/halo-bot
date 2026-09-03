@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { REPLY_LANGUAGES } from '../../host/personas';
 import type { AuditRow, AutoReviewRule, Settings } from '../../host/types';
 import { CloseIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons';
 
@@ -77,6 +78,28 @@ function General({ settings, onSave }: { settings: Settings; onSave: SettingsMod
       <div className="card">
         <div className="setting-row">
           <div className="setting-row__text">
+            <div>Reply language</div>
+            <div className="setting-row__desc">
+              What your bots answer in. Matching follows each message rather than the conversation, so a bot
+              switches with you mid-thread. Code, paths and error strings are never translated.
+            </div>
+          </div>
+          <select
+            className="input"
+            style={{ width: 200 }}
+            value={settings.replyLanguage ?? 'match'}
+            onChange={(e) => void onSave({ replyLanguage: e.target.value })}
+          >
+            {REPLY_LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-row__text">
             <div>Timezone</div>
             <div className="setting-row__desc">Used for routines and for telling the bot what time it is.</div>
           </div>
@@ -149,6 +172,63 @@ function General({ settings, onSave }: { settings: Settings; onSave: SettingsMod
       </div>
 
       <HiddenBots />
+
+      <div className="section-label" style={{ marginTop: 24 }}>Automation</div>
+        <div className="setting-row">
+          <div className="setting-row__text">
+            <div>Connect n8n</div>
+            <div className="setting-row__desc">
+              Lets your bots read, write and fire workflows on your own n8n. Every service you have connected there
+              becomes something a bot can use, and those credentials stay in n8n rather than coming in here.
+              Writing, activating and firing a workflow all ask you first.
+            </div>
+          </div>
+          <button
+            className="switch"
+            data-on={settings.n8n?.enabled ?? false}
+            aria-label="Connect n8n"
+            onClick={() =>
+              void onSave({
+                n8n: {
+                  ...(settings.n8n ?? { baseUrl: 'http://localhost:5678', apiKey: '' }),
+                  enabled: !(settings.n8n?.enabled ?? false),
+                },
+              })
+            }
+          />
+        </div>
+        {settings.n8n?.enabled && (
+          <>
+            <div className="setting-row">
+              <div className="setting-row__text">
+                <div>Address</div>
+                <div className="setting-row__desc">Where n8n is, e.g. http://localhost:5678.</div>
+              </div>
+              <input
+                className="input"
+                style={{ width: 240 }}
+                value={settings.n8n.baseUrl}
+                placeholder="http://localhost:5678"
+                onChange={(e) => void onSave({ n8n: { ...settings.n8n, baseUrl: e.target.value } })}
+              />
+            </div>
+            <div className="setting-row">
+              <div className="setting-row__text">
+                <div>API key</div>
+                <div className="setting-row__desc">
+                  n8n → Settings → n8n API → Create an API key. Sealed with the OS keychain before it reaches disk.
+                </div>
+              </div>
+              <input
+                className="input"
+                style={{ width: 240 }}
+                type="password"
+                value={settings.n8n.apiKey}
+                onChange={(e) => void onSave({ n8n: { ...settings.n8n, apiKey: e.target.value } })}
+              />
+            </div>
+          </>
+        )}
 
       <div className="section-label" style={{ marginTop: 24 }}>Windows</div>
       <div className="card">

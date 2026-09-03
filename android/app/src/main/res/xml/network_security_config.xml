@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is permitted here and then narrowed in code.
+
+  The one thing this app has to be able to reach is a model server on the user's own machine, and
+  that is `http://192.168.x.x:11434` — a LAN address never has a certificate. Android's config file
+  can only name hosts, not address ranges, so there is no way to write "private addresses only" in
+  this file: it is either off, which breaks the local-model case the app exists for, or on.
+
+  It is on, and the rule this file cannot express lives in `Http.PrivateCleartextOnly`, an
+  interceptor on the single OkHttp client every request in the app goes through: plain http reaches
+  loopback, RFC1918, CGNAT and link-local addresses, and is refused for anything else. Certificate
+  validation is untouched — https is still verified against the system trust store, and the user's
+  own CAs are deliberately not trusted here.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -2,3 +2,14 @@ node_modules/
 dist/
 release/
 *.log
+docs/_grok_reference/
+
+# The phone build's outputs. `local.properties` names this machine's SDK path and is not portable.
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+
+# The box helper's build tree; the staged binary in build/ is what packaging uses.
+native/halo-box/target/

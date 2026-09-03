@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Agent, Routine, RoutineTrigger } from '../../host/types';
 import { checkEndpoint } from '../../host/agui';
+import { PERSONAS } from '../../host/personas';
 import { Avatar, AVATAR_COLORS } from './Avatar';
 import {
   ChevronLeftIcon,
@@ -37,6 +38,8 @@ export function describeTrigger(trigger: RoutineTrigger): string {
       return `every day at ${hh}:${mm}`;
     case 'weekdays':
       return `weekdays at ${hh}:${mm}`;
+    case 'webhook':
+      return 'when its webhook is called';
     default:
       return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][trigger.weekday]} at ${hh}:${mm}`;
   }
@@ -456,12 +459,14 @@ function TriggerRow({
     const [h, m] = time.split(':').map(Number);
     if (kind === 'interval') onChange({ kind: 'interval', everyMinutes: 60 });
     else if (kind === 'weekly') onChange({ kind: 'weekly', weekday: 1, hour: h ?? 9, minute: m ?? 0 });
+    // The token is the hook's whole address, so it is minted once here and never edited afterwards.
+    else if (kind === 'webhook') onChange({ kind: 'webhook', token: crypto.randomUUID().replace(/-/g, '') });
     else onChange({ kind, hour: h ?? 9, minute: m ?? 0 } as RoutineTrigger);
   };
 
   const changeTime = (value: string) => {
     const [h, m] = value.split(':').map(Number);
-    if (trigger.kind === 'interval') return;
+    if (trigger.kind === 'interval' || trigger.kind === 'webhook') return;
     onChange({ ...trigger, hour: h ?? 9, minute: m ?? 0 });
   };
 
@@ -473,6 +478,7 @@ function TriggerRow({
         <option value="weekdays">Weekdays</option>
         <option value="weekly">Weekly</option>
         <option value="interval">Every N minutes</option>
+        <option value="webhook">Webhook</option>
       </select>
 
       {trigger.kind === 'weekly' && (
@@ -489,7 +495,9 @@ function TriggerRow({
         </select>
       )}
 
-      {trigger.kind === 'interval' ? (
+      {trigger.kind === 'webhook' ? (
+        <WebhookUrl token={trigger.token} />
+      ) : trigger.kind === 'interval' ? (
         <input
           className="input"
           type="number"
@@ -510,6 +518,35 @@ function TriggerRow({
   );
 }
 
+/**
+ * The loopback URL that fires this routine. Read-only and click-to-copy: it is an address to paste into
+ * Task Scheduler or a script, never something to type by hand.
+ */
+function WebhookUrl({ token }: { token: string }) {
+  const [url, setUrl] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    void window.halo.webhookUrl(token).then(setUrl);
+  }, [token]);
+
+  return (
+    <input
+      className="input"
+      readOnly
+      value={copied ? 'Copied' : url || 'listener not running'}
+      title={url ? `POST or GET ${url} to run this routine` : 'The webhook listener could not start'}
+      onFocus={(e) => e.currentTarget.select()}
+      onClick={() => {
+        if (!url) return;
+        void navigator.clipboard.writeText(url);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      }}
+    />
+  );
+}
+
 function AgentSettings({
   agent,
   onUpdateAgent,
@@ -525,6 +562,7 @@ function AgentSettings({
   const [memory, setMemory] = useState('');
   const [boxDir, setBoxDir] = useState('');
   const [model, setModel] = useState(agent.model ?? '');
+  const [persona, setPersona] = useState(agent.persona ?? '');
   const [models, setModels] = useState<string[]>([]);
   const [endpoint, setEndpoint] = useState(agent.endpoint ?? '');
   const [endpointAuth, setEndpointAuth] = useState('');
@@ -533,6 +571,7 @@ function AgentSettings({
   useEffect(() => {
     setName(agent.name);
     setTitle(agent.title);
+    setPersona(agent.persona ?? '');
     setDescription(agent.description);
     setModel(agent.model ?? '');
     setEndpoint(agent.endpoint ?? '');
@@ -602,6 +641,50 @@ function AgentSettings({
             onChange={(e) => setDescription(e.target.value)}
             onBlur={() => void onUpdateAgent({ description })}
           />
+        </div>
+      </div>
+
+      <div className="field">
+        <label>How it talks</label>
+        <div className="persona-grid">
+          {PERSONAS.map((p) => (
+            <button
+              key={p.id}
+              className="persona-chip"
+              data-selected={!agent.persona && (agent.personaId ?? 'colleague') === p.id}
+              title={p.blurb}
+              onClick={() => void onUpdateAgent({ personaId: p.id, persona: '' })}
+            >
+              <span className="persona-chip__glyph">{p.glyph}</span>
+              <span className="persona-chip__label">{p.label}</span>
+            </button>
+          ))}
+          <button
+            className="persona-chip"
+            data-selected={Boolean(agent.persona)}
+            title="Write your own"
+            onClick={() => void onUpdateAgent({ persona: agent.persona || ' ' })}
+          >
+            <span className="persona-chip__glyph">✎</span>
+            <span className="persona-chip__label">Custom</span>
+          </button>
+        </div>
+        {agent.persona ? (
+          <textarea
+            className="textarea"
+            value={persona}
+            placeholder="Talk like a 1940s newsreel announcer. Keep every fact, path and number exact."
+            onChange={(e) => setPersona(e.target.value)}
+            onBlur={() => void onUpdateAgent({ persona: persona.trim() })}
+          />
+        ) : (
+          <div className="setting-row__desc">
+            {PERSONAS.find((p) => p.id === (agent.personaId ?? 'colleague'))?.blurb}
+          </div>
+        )}
+        <div className="setting-row__desc">
+          A voice changes how it sounds, never what it is allowed to do. The approval gate and Halo's floor are
+          the same whichever one you pick.
         </div>
       </div>
 

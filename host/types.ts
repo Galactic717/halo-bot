@@ -35,6 +35,14 @@ export interface Agent {
   endpoint?: string;
   /** Sent as the Authorization header to that endpoint. Sealed with the OS keychain like the API key. */
   endpointAuth?: string;
+  /**
+   * Which preset voice this bot uses, from host/personas.ts. Empty means the default colleague.
+   * Kept beside `persona` rather than resolved into it, so the picker can show what is selected and
+   * a preset that is later reworded reaches the bots already using it.
+   */
+  personaId?: string;
+  /** A voice written by hand. When set it replaces the preset entirely. */
+  persona?: string;
 }
 
 export interface UsageRow {
@@ -114,7 +122,22 @@ export interface Message {
   event?: SystemEvent;
 }
 
-export type ApprovalSurface = 'external_shell' | 'external_read' | 'shell' | 'browser' | 'file_write' | 'agent_write';
+export type ApprovalSurface =
+  | 'external_shell'
+  | 'external_read'
+  | 'shell'
+  | 'browser'
+  | 'file_write'
+  | 'agent_write'
+  /**
+   * Changing or running something in the user's automation tool.
+   *
+   * Its own surface rather than a borrowed one, because the risk is its own shape: an n8n workflow is
+   * not a file and not a command, it is a thing that keeps running after the bot has stopped and can
+   * reach every service the user connected to it. Borrowing `external_shell` would have made the
+   * approval card say "run a command on your computer", which is not what is being approved.
+   */
+  | 'automation';
 
 export interface ApprovalRequest {
   id: string;
@@ -139,7 +162,9 @@ export type RoutineTrigger =
   | { kind: 'interval'; everyMinutes: number }
   | { kind: 'daily'; hour: number; minute: number }
   | { kind: 'weekdays'; hour: number; minute: number }
-  | { kind: 'weekly'; weekday: number; hour: number; minute: number };
+  | { kind: 'weekly'; weekday: number; hour: number; minute: number }
+  /** Fired by an HTTP POST to Halo's loopback listener rather than by the clock. */
+  | { kind: 'webhook'; token: string };
 
 export interface RoutineRun {
   at: number;
@@ -244,6 +269,11 @@ export interface Settings {
     imageModel: string;
   };
   theme: 'system' | 'dark' | 'light';
+  /**
+   * What language bots answer in. `match` follows the user message by message; anything else is a
+   * language name the prompt names outright. See host/personas.ts.
+   */
+  replyLanguage: string;
   timezone: string;
   localExecution: 'ask' | 'allow' | 'never';
   /** The master switch. With it off nothing is reviewed and nothing is asked. */
@@ -263,6 +293,14 @@ export interface Settings {
   minimizeToTray: boolean;
   rules: AutoReviewRule[];
   webSearch: { enabled: boolean; endpoint: string };
+  /**
+   * The user's own n8n, so a bot can read, write and fire their automations.
+   *
+   * n8n is where a lot of people already keep the integrations Halo does not have — a bot that can
+   * write an n8n workflow inherits every service they have connected to it, which is a far better
+   * trade than growing a connector per vendor. The key is sealed like the model key.
+   */
+  n8n: { enabled: boolean; baseUrl: string; apiKey: string };
   /** Sidebar grouping; anything not listed here shows under the ungrouped bots. */
   sections: { id: string; name: string; agentIds: string[]; collapsed?: boolean }[];
   /** Installed MCP plugins; the shape matches McpServerSpec. */

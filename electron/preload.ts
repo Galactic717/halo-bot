@@ -34,6 +34,7 @@ const api = {
   saveRoutine: (input: Record<string, unknown>): Promise<Routine | null> => ipcRenderer.invoke('halo:routine.save', input),
   deleteRoutine: (id: string): Promise<void> => ipcRenderer.invoke('halo:routine.delete', id),
   runRoutine: (id: string): Promise<void> => ipcRenderer.invoke('halo:routine.run', id),
+  webhookUrl: (token: string): Promise<string> => ipcRenderer.invoke('halo:webhook.url', token),
 
   computerShow: (agentId: string, bounds: Rect): Promise<void> => ipcRenderer.invoke('halo:computer.show', agentId, bounds),
   computerHide: (): Promise<void> => ipcRenderer.invoke('halo:computer.hide'),
@@ -52,6 +53,8 @@ const api = {
     ipcRenderer.invoke('halo:message.delete', conversationId, messageId),
   reactToMessage: (conversationId: string, messageId: string, emoji: string): Promise<void> =>
     ipcRenderer.invoke('halo:message.react', conversationId, messageId, emoji),
+  answerWidget: (conversationId: string, messageId: string, value: string): Promise<void> =>
+    ipcRenderer.invoke('halo:message.answer', conversationId, messageId, value),
   skills: (agentId: string): Promise<{ id: string; name: string; description: string; body: string }[]> =>
     ipcRenderer.invoke('halo:skills', agentId),
   deleteSkill: (agentId: string, name: string): Promise<boolean> => ipcRenderer.invoke('halo:skill.delete', agentId, name),
@@ -96,6 +99,8 @@ const api = {
   pluginTools: (id: string): Promise<{ name: string; description: string }[]> => ipcRenderer.invoke('halo:plugins.tools', id),
   addCustomPlugin: (input: { name: string; command: string; args: string; description: string }): Promise<McpServerSpec | null> =>
     ipcRenderer.invoke('halo:plugins.addCustom', input),
+  addPluginsFromJson: (text: string): Promise<{ added: string[]; error?: string }> =>
+    ipcRenderer.invoke('halo:plugins.addFromJson', text),
   pluginsInstalled: (): Promise<McpServerSpec[]> => ipcRenderer.invoke('halo:plugins.installed'),
   pluginStatus: (): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.status'),
   installPlugin: (spec: McpServerSpec): Promise<McpServerStatus[]> => ipcRenderer.invoke('halo:plugins.install', spec),

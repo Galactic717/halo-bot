@@ -182,6 +182,11 @@ export function PluginsModal({ onClose }: PluginsModalProps) {
         {customOpen && (
           <CustomServerForm
             onCancel={() => setCustomOpen(false)}
+            onJson={async (text) => {
+              const result = await window.halo.addPluginsFromJson(text);
+              if (!result.error) await refresh();
+              return result;
+            }}
             onSave={async (input) => {
               setCustomOpen(false);
               setBusy('custom');
@@ -637,19 +642,70 @@ function PluginSetup({
   );
 }
 
-/** Any MCP server the user runs themselves, described by its command line. */
+/**
+ * Any MCP server, however its author documents it.
+ *
+ * Three ways in, because there are three ways a server shows up in the world: a command line, an
+ * address, and the JSON snippet every vendor page actually prints. The third is the one that makes
+ * "add absolutely anything" true rather than aspirational - paste what the vendor wrote and Halo
+ * reads the command, the arguments, the environment and the headers out of it.
+ */
 function CustomServerForm({
   onCancel,
   onSave,
+  onJson,
 }: {
   onCancel: () => void;
   onSave: (input: { name: string; command: string; args: string; description: string }) => void;
+  onJson: (text: string) => Promise<{ added: string[]; error?: string }>;
 }) {
+  const [mode, setMode] = useState<'command' | 'url' | 'json'>('command');
   const [name, setName] = useState('');
   const [command, setCommand] = useState('npx');
   const [args, setArgs] = useState('');
+  const [url, setUrl] = useState('');
   const [description, setDescription] = useState('');
-  const ready = name.trim().length > 0 && command.trim().length > 0;
+  const [json, setJson] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const ready =
+    mode === 'json'
+      ? json.trim().length > 0
+      : mode === 'url'
+        ? name.trim().length > 0 && /^https?:\/\//i.test(url.trim())
+        : name.trim().length > 0 && command.trim().length > 0;
+
+  const submit = async () => {
+    setError('');
+    if (mode === 'json' || mode === 'url') {
+      // A remote server is a bridged one, and the paste path already knows how to bridge it, so the
+      // URL form hands it the same shape rather than writing the mcp-remote command line twice.
+      const text = mode === 'json' ? json : JSON.stringify({ mcpServers: { [name.trim()]: { url: url.trim() } } });
+      setBusy(true);
+      const result = await onJson(text);
+      setBusy(false);
+      if (result.error) {
+        setError(result.error);
+        return;
+      }
+      onCancel();
+      return;
+    }
+    onSave({ name: name.trim(), command: command.trim(), args: args.trim(), description: description.trim() });
+  };
+
+  const PLACEHOLDER = [
+    '{',
+    '  "mcpServers": {',
+    '    "my-server": {',
+    '      "command": "npx",',
+    '      "args": ["-y", "some-mcp-server"],',
+    '      "env": { "API_KEY": "..." }',
+    '    }',
+    '  }',
+    '}',
+  ].join('\n');
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
@@ -657,46 +713,114 @@ function CustomServerForm({
         <div className="modal__body">
           <h2>Add a server</h2>
           <p className="setting-row__desc" style={{ marginTop: -12 }}>
-            Any MCP server that speaks stdio. Its tools reach every bot as <code>mcp__…</code>, the same as a
-            marketplace plugin.
+            Any MCP server at all. Its tools reach every bot as <code>mcp__…</code>, the same as a marketplace
+            plugin, and go through the same approval gate.
           </p>
-          <div className="field">
-            <label htmlFor="custom-name">Name</label>
-            <input id="custom-name" className="input" autoFocus value={name} placeholder="My Server" onChange={(e) => setName(e.target.value)} />
+
+          <div className="persona-grid" style={{ marginBottom: 12 }}>
+            <button className="persona-chip" data-selected={mode === 'command'} onClick={() => setMode('command')}>
+              <span className="persona-chip__label">A command</span>
+            </button>
+            <button className="persona-chip" data-selected={mode === 'url'} onClick={() => setMode('url')}>
+              <span className="persona-chip__label">A URL</span>
+            </button>
+            <button className="persona-chip" data-selected={mode === 'json'} onClick={() => setMode('json')}>
+              <span className="persona-chip__label">Paste its config</span>
+            </button>
           </div>
-          <div className="field">
-            <label htmlFor="custom-command">Command</label>
-            <input id="custom-command" className="input" value={command} placeholder="npx" onChange={(e) => setCommand(e.target.value)} />
-          </div>
-          <div className="field">
-            <label htmlFor="custom-args">Arguments</label>
-            <input
-              id="custom-args"
-              className="input"
-              value={args}
-              placeholder="-y my-mcp-server --flag"
-              onChange={(e) => setArgs(e.target.value)}
-            />
-            <div className="setting-row__desc">Split on spaces; wrap a path with spaces in "quotes".</div>
-          </div>
-          <div className="field">
-            <label htmlFor="custom-desc">Description</label>
-            <input
-              id="custom-desc"
-              className="input"
-              value={description}
-              placeholder="What it is for"
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </div>
+
+          {mode === 'json' ? (
+            <div className="field">
+              <label htmlFor="custom-json">Config</label>
+              <textarea
+                id="custom-json"
+                className="textarea"
+                rows={9}
+                autoFocus
+                value={json}
+                placeholder={PLACEHOLDER}
+                onChange={(e) => setJson(e.target.value)}
+              />
+              <div className="setting-row__desc">
+                The snippet from the server’s own README — the one written for Claude Desktop, Cursor or VS Code.
+                Several servers in one block are all added. A <code>url</code> server is bridged for you.
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="field">
+                <label htmlFor="custom-name">Name</label>
+                <input
+                  id="custom-name"
+                  className="input"
+                  autoFocus
+                  value={name}
+                  placeholder="My Server"
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+              {mode === 'url' ? (
+                <div className="field">
+                  <label htmlFor="custom-url">Address</label>
+                  <input
+                    id="custom-url"
+                    className="input"
+                    value={url}
+                    placeholder="https://example.com/mcp"
+                    onChange={(e) => setUrl(e.target.value)}
+                  />
+                  <div className="setting-row__desc">
+                    A hosted server, bridged to stdio by <code>mcp-remote</code>. If it signs you in, the bridge
+                    opens the browser window itself.
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="field">
+                    <label htmlFor="custom-command">Command</label>
+                    <input
+                      id="custom-command"
+                      className="input"
+                      value={command}
+                      placeholder="npx"
+                      onChange={(e) => setCommand(e.target.value)}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="custom-args">Arguments</label>
+                    <input
+                      id="custom-args"
+                      className="input"
+                      value={args}
+                      placeholder="-y my-mcp-server --flag"
+                      onChange={(e) => setArgs(e.target.value)}
+                    />
+                    <div className="setting-row__desc">Split on spaces; wrap a path with spaces in "quotes".</div>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="custom-desc">Description</label>
+                    <input
+                      id="custom-desc"
+                      className="input"
+                      value={description}
+                      placeholder="What it is for"
+                      onChange={(e) => setDescription(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {error && (
+            <div className="setting-row__desc" style={{ color: 'var(--text-danger)' }}>
+              {error}
+            </div>
+          )}
+
           <div className="approval__actions">
-            <button
-              className="btn"
-              data-variant="primary"
-              disabled={!ready}
-              onClick={() => onSave({ name: name.trim(), command: command.trim(), args: args.trim(), description: description.trim() })}
-            >
-              Add server
+            <button className="btn" data-variant="primary" disabled={!ready || busy} onClick={() => void submit()}>
+              {busy ? 'Adding…' : 'Add server'}
             </button>
             <button className="btn" onClick={onCancel}>
               Cancel

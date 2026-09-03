@@ -8,7 +8,11 @@ export interface PortableSkill {
 export interface PortableBot {
   kind: 'halo-bot';
   version: 1;
-  agent: Pick<Agent, 'name' | 'title' | 'description' | 'avatar'> & { model?: string };
+  agent: Pick<Agent, 'name' | 'title' | 'description' | 'avatar'> & {
+    model?: string;
+    personaId?: string;
+    persona?: string;
+  };
   memory: string;
   skills: PortableSkill[];
   routines: { name: string; prompt: string; triggers: RoutineTrigger[]; enabled: boolean }[];
@@ -29,6 +33,9 @@ export function buildPortableBot(input: {
       description: input.agent.description,
       avatar: { color: input.agent.avatar.color, face: input.agent.avatar.face },
       ...(input.agent.model ? { model: input.agent.model } : {}),
+      // The voice travels with the bot: a persona is most of what makes an exported bot recognisable.
+      ...(input.agent.personaId ? { personaId: input.agent.personaId } : {}),
+      ...(input.agent.persona ? { persona: input.agent.persona } : {}),
     },
     memory: input.memory,
     skills: input.skills,
@@ -79,6 +86,8 @@ export function parsePortableBot(raw: unknown): PortableBot | null {
         face: Number((agent.avatar as Record<string, unknown>)?.face ?? 0),
       },
       ...(typeof agent.model === 'string' && agent.model ? { model: agent.model } : {}),
+      ...(typeof agent.personaId === 'string' && agent.personaId ? { personaId: agent.personaId } : {}),
+      ...(typeof agent.persona === 'string' && agent.persona ? { persona: agent.persona } : {}),
     },
     memory: typeof value.memory === 'string' ? value.memory : '',
     skills,

@@ -3,6 +3,9 @@ import type { HaloEvent, Routine, RoutineRun, RoutineTrigger } from './types.ts'
 import type { Runner } from './runner.ts';
 
 export function nextRunForTrigger(trigger: RoutineTrigger, from = Date.now()): number {
+  // A webhook fires when something outside calls in, so it has no next time. Pushing it far out keeps
+  // it out of `nextRun`'s minimum without needing a second code path for "never".
+  if (trigger.kind === 'webhook') return Number.MAX_SAFE_INTEGER;
   if (trigger.kind === 'interval') return from + trigger.everyMinutes * 60_000;
   const next = new Date(from);
   next.setSeconds(0, 0);
@@ -25,10 +28,20 @@ export function nextRunForTrigger(trigger: RoutineTrigger, from = Date.now()): n
   return next.getTime();
 }
 
-/** Earliest of all the routine's triggers. */
+/**
+ * "There is no next time", for a routine every one of whose triggers waits to be called.
+ *
+ * It has to be a real number rather than undefined, because `nextRunAt` is what the tick compares
+ * against and an absent one falls back to `createdAt` — which is in the past, so the routine fires
+ * immediately. The old fallback was `now + 24h`, which is worse than either: a webhook-only routine
+ * quietly became a daily one.
+ */
+export const NEVER = Number.MAX_SAFE_INTEGER;
+
+/** Earliest of all the routine's triggers, or `NEVER` when none of them watches the clock. */
 export function nextRun(routine: Pick<Routine, 'triggers'>, from = Date.now()): number {
-  const times = (routine.triggers ?? []).map((t) => nextRunForTrigger(t, from));
-  return times.length ? Math.min(...times) : from + 24 * 60 * 60_000;
+  const times = (routine.triggers ?? []).map((t) => nextRunForTrigger(t, from)).filter((t) => t !== NEVER);
+  return times.length ? Math.min(...times) : NEVER;
 }
 
 const DEFAULT_MAX_RUNS_PER_DAY = 24;
@@ -78,7 +91,12 @@ export class Scheduler {
 
   start() {
     for (const r of this.store.listRoutines()) {
-      if (r.enabled && !r.nextRunAt) this.store.saveRoutine({ ...r, nextRunAt: nextRun(r) });
+      if (!r.enabled) continue;
+      // The second half is a repair, not a schedule: a version of this file that had no "never"
+      // wrote `now + 24h` onto webhook-only routines, and every one of those has been firing daily
+      // ever since. Recomputing on start clears it without asking anybody to notice.
+      const clockless = (r.triggers ?? []).every((t) => t.kind === 'webhook');
+      if (!r.nextRunAt || (clockless && r.nextRunAt !== NEVER)) this.store.saveRoutine({ ...r, nextRunAt: nextRun(r) });
     }
     this.timer = setInterval(() => this.tick(), 20_000);
     this.tick();

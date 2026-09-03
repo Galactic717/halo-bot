@@ -11,6 +11,14 @@ export interface McpField {
   placeholder?: string;
   /** Argument form only: the flag this value follows, e.g. "--token". Bare values are positional. */
   flag?: string;
+  /**
+   * Asked for, but not insisted on.
+   *
+   * Some servers are two servers in one — n8n-mcp serves node documentation with no credential at all
+   * and workflow management with one — and treating every declared field as mandatory blocks the free
+   * half behind the paid one. The field still appears in Setup; it just does not hold the install.
+   */
+  optional?: boolean;
 }
 
 export interface McpServerSpec {
@@ -42,8 +50,8 @@ export interface McpServerSpec {
 /** Everything a spec needs before it can start. */
 export function missingFields(spec: McpServerSpec): McpField[] {
   const missing: McpField[] = [];
-  for (const field of spec.requires ?? []) if (!spec.env?.[field.key]?.trim()) missing.push(field);
-  for (const field of spec.setup ?? []) if (!spec.config?.[field.key]?.trim()) missing.push(field);
+  for (const field of spec.requires ?? []) if (!field.optional && !spec.env?.[field.key]?.trim()) missing.push(field);
+  for (const field of spec.setup ?? []) if (!field.optional && !spec.config?.[field.key]?.trim()) missing.push(field);
   return missing;
 }
 
@@ -291,6 +299,72 @@ export class McpManager {
 
   isPluginTool(name: string): boolean {
     return name.startsWith(TOOL_PREFIX);
+  }
+
+  /**
+   * Past this many plugin tools, their schemas stop travelling in every prompt and the bot looks them
+   * up instead. Ported from Grok Bot's `grok_bot_dynamic_tools`
+   * (docs/GROK_BOT_0.24_0.27_TEARDOWN.md §7): for a local model with an 8k window this is not a saving,
+   * it is the difference between the model seeing its instructions and silently losing them. Eight is
+   * roughly where a couple of installed servers stop being free.
+   */
+  static readonly INLINE_LIMIT = 8;
+
+  /** The two meta-tools that replace inlined schemas once there are too many to carry. */
+  metaSchemas(): ToolSchema[] {
+    const names = this.getSpecs()
+      .filter((spec) => spec.enabled !== false)
+      .map((spec) => spec.name)
+      .join(', ');
+    return [
+      {
+        name: 'ListPluginTools',
+        description: `List the tools the installed plugins expose, with their arguments. Installed: ${names || 'none'}. Call this before CallPluginTool so you use a real name and real arguments.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            plugin: { type: 'string', description: 'Optional: only this plugin, by name or id.' },
+          },
+        },
+      },
+      {
+        name: 'CallPluginTool',
+        description: 'Call one plugin tool by the exact name ListPluginTools gave you.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            arguments: { type: 'object', description: 'The tool’s arguments, matching its schema.' },
+          },
+          required: ['name'],
+        },
+      },
+    ];
+  }
+
+  /** Names, descriptions and argument shapes, rendered for ListPluginTools. */
+  catalogue(filter?: string): string {
+    const wanted = (filter ?? '').trim().toLowerCase();
+    const out: string[] = [];
+    for (const spec of this.getSpecs()) {
+      if (spec.enabled === false) continue;
+      if (wanted && !spec.name.toLowerCase().includes(wanted) && !spec.id.toLowerCase().includes(wanted)) continue;
+      const client = this.clients.get(spec.id);
+      if (!client || client.state !== 'ready') {
+        out.push(`${spec.name}: ${client?.state ?? 'stopped'}${client?.error ? ` — ${client.error}` : ''}`);
+        continue;
+      }
+      out.push(`${spec.name}:`);
+      for (const tool of client.tools) {
+        const name = `${TOOL_PREFIX}${spec.id}__${tool.name}`.replace(/[^a-zA-Z0-9_]/g, '_');
+        const schema = (tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] }) ?? {};
+        const args = Object.keys(schema.properties ?? {});
+        const required = new Set(schema.required ?? []);
+        const shape = args.length ? `(${args.map((a) => (required.has(a) ? a : `${a}?`)).join(', ')})` : '()';
+        out.push(`  ${name}${shape} — ${(tool.description ?? '').split('\n')[0]?.slice(0, 160) ?? ''}`);
+      }
+    }
+    return out.join('\n') || 'No plugins are installed.';
   }
 
   /** What one plugin currently exposes, for its detail page. Empty until the server is ready. */

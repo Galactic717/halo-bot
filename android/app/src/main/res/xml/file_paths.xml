@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Only the bots' boxes are shareable. Halo's own settings, transcripts and audit trail sit
+         beside them under files/ and must never be reachable through a content uri. -->
+    <files-path name="boxes" path="agents/" />
+</paths>

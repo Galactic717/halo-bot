@@ -24,7 +24,10 @@ export type Intent =
   | 'type'
   | 'read'
   | 'agent_write'
-  | 'plugin_call';
+  | 'plugin_call'
+  | 'read_workflow'
+  | 'write_workflow'
+  | 'run_workflow';
 
 /** What the gate is being asked to approve. */
 export interface ActionSummary {
@@ -105,6 +108,9 @@ const BASE: Record<ApprovalRequest['surface'], Decision> = {
   browser: 'allow',
   shell: 'allow',
   agent_write: 'allow',
+  // A workflow outlives the turn that wrote it and reaches every service the user connected, so it
+  // starts where the other outward-facing surfaces start.
+  automation: 'ask',
 };
 
 /**
@@ -503,6 +509,15 @@ export function intentOf(toolName: string): Intent | undefined {
       return 'write_file';
     case 'ListFiles':
       return 'list_files';
+    case 'N8nWorkflows':
+    case 'N8nWorkflow':
+    case 'N8nExecutions':
+      return 'read_workflow';
+    case 'N8nSaveWorkflow':
+    case 'N8nActivateWorkflow':
+      return 'write_workflow';
+    case 'N8nRunWorkflow':
+      return 'run_workflow';
     case 'CreateAgent':
     case 'UpdateAgent':
     case 'CreateRoutine':
@@ -570,6 +585,24 @@ function describe(toolName: string, args: Record<string, unknown>, boxDir: strin
         ...(pick('url') ? { url: pick('url') } : {}),
       };
     }
+    case 'N8nSaveWorkflow':
+      return {
+        summary: `${pick('workflow_id') ? 'Update' : 'Create'} the n8n workflow "${pick('name') || pick('workflow_id')}"`,
+        detail: pick('workflow'),
+        ...(intent ? { intent } : {}),
+      };
+    case 'N8nActivateWorkflow':
+      return {
+        summary: `${args.active === false ? 'Deactivate' : 'Activate'} an n8n workflow`,
+        detail: pick('workflow_id'),
+        ...(intent ? { intent } : {}),
+      };
+    case 'N8nRunWorkflow':
+      return {
+        summary: `Fire the n8n webhook ${firstWords(pick('path'), 40)}`,
+        detail: `${pick('method') || 'POST'} ${pick('path')} ${pick('body')}`.trim(),
+        ...(intent ? { intent } : {}),
+      };
     case 'CreateAgent':
       return { summary: 'Create a new bot', detail: `${pick('name')} — ${pick('description')}`, ...(intent ? { intent } : {}) };
     case 'UpdateAgent':

@@ -83,6 +83,39 @@ export const MCP_CATALOG: McpServerSpec[] = [
     ...npm('@wonderwhy-er/desktop-commander'),
   },
 
+  // ---------------------------------------------------------------- Automation
+  {
+    id: 'n8n',
+    name: 'n8n',
+    description:
+      'Build, validate and run n8n workflows from a chat: 500+ node schemas to write against, and the ' +
+      'management API to create, update and execute the workflows on your own instance.',
+    category: 'Automation',
+    icon: 'n8n',
+    featured: true,
+    /*
+     * Both optional, because n8n-mcp is two servers in one: without them it still serves the node
+     * documentation and the workflow validator, which is the half a bot needs to *write* a workflow.
+     * Demanding a key before it will start would block the useful half behind the risky one.
+     */
+    requires: [
+      {
+        key: 'N8N_API_URL',
+        label: 'Your n8n address',
+        optional: true,
+        hint: 'The instance a bot should manage, e.g. http://localhost:5678.',
+        placeholder: 'http://localhost:5678',
+      },
+      {
+        key: 'N8N_API_KEY',
+        label: 'n8n API key',
+        optional: true,
+        hint: 'n8n → Settings → n8n API → Create an API key. Only needed to create, update and run workflows.',
+      },
+    ],
+    ...npm('n8n-mcp'),
+  },
+
   // ---------------------------------------------------------------- Canvas
   {
     id: 'mermaid',
@@ -463,6 +496,18 @@ export const MCP_CATALOG: McpServerSpec[] = [
   },
 
   // ---------------------------------------------------------------- Productivity
+  {
+    id: 'google-classroom',
+    name: 'Google Classroom',
+    description:
+      'Courses, coursework, announcements, rosters and submissions — so a bot can chase a deadline or ' +
+      'draft an assignment where the class actually is.',
+    category: 'Productivity',
+    icon: 'googleclassroom',
+    ...npm('gogcli-mcp-classroom'),
+    source: 'https://github.com/chrischall/gogcli-mcp',
+  },
+
   {
     id: 'notion',
     name: 'Notion',

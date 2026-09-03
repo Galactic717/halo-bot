@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { boxHelper, canConfine } from './box.ts';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, statfsSync, copyFileSync, realpathSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, relative, resolve, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Store } from './store.ts';
@@ -8,6 +8,9 @@ import type { Agent, ApprovalDecision, ApprovalRequest, HaloEvent, Message, Rout
 import type { ToolSchema } from './provider.ts';
 import type { MemoryStore, MemoryTier } from './memory.ts';
 import type { SkillStore } from './skills.ts';
+import { REFERENCE_DIR, referenceFiles } from './reference.ts';
+import { listModels } from './provider.ts';
+import { activateWorkflow, getWorkflow, listExecutions, listWorkflows, probeN8n, runWorkflow, saveWorkflow } from './n8n.ts';
 import type { Widget } from './types.ts';
 
 export interface ComputerPort {
@@ -31,6 +34,7 @@ export interface RunnerPort {
   postToRoom(channelId: string, fromAgentId: string, text: string): void;
   dispatchSubagent(parentAgentId: string, kind: 'browser' | 'research' | 'shell', description: string, prompt: string): string;
   checkSubagent(id: string): string;
+  messageSubagent(id: string, text: string): string;
   stopSubagent(id: string): string;
 }
 
@@ -47,6 +51,8 @@ export interface ToolContext {
   memory: MemoryStore;
   skills: SkillStore;
   sendWidget: (widget: Widget) => Message;
+  /** Plugin health for SelfCheck. Absent in contexts that have no plugin manager, such as a subagent. */
+  pluginStatus?: () => { name: string; state: string; toolCount: number; error?: string }[];
   /** `confined` runs it through the low-integrity box helper, the same as a foreground box command. */
   startBackground: (command: string, cwd: string, confined: boolean) => string;
   awaitBackground: (id: string, timeoutMs: number) => Promise<string>;
@@ -157,7 +163,19 @@ export function runShell(
   confined = false,
 ): Promise<{ code: number; out: string }> {
   return new Promise((resolveP) => {
-    mkdirSync(cwd, { recursive: true });
+    /*
+     * A box is Halo's to create; the user's machine is not.
+     *
+     * This used to `mkdirSync` whatever it was handed. For the box that is right — it may not exist
+     * yet on the first command. For `ExternalShell` it is both wrong and broken: a working directory
+     * on the user's machine already exists or the command should say so, and creating one that is a
+     * drive root throws EPERM, which surfaced as "the tool failed" with no hint of why.
+     */
+    if (confined) mkdirSync(cwd, { recursive: true });
+    else if (!existsSync(cwd)) {
+      resolveP({ code: -1, out: `No such directory on this machine: ${cwd}` });
+      return;
+    }
     const helper = confined && canConfine(cwd, process.resourcesPath) ? boxHelper(process.resourcesPath) : null;
     const child = helper
       ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], {
@@ -575,7 +593,9 @@ export const TOOLS: Tool[] = [
   {
     schema: {
       name: 'Screenshot',
-      description: "Take a screenshot of your computer's screen and save it into your box.",
+      // It captures the browser view and nothing else. The old wording said "your computer's screen",
+      // which invited a bot to promise the user a look at their desktop and then hand them a web page.
+      description: 'Take a picture of the page your browser is showing and save it into your box. This is your browser, not the user\'s desktop — Halo never captures that.',
       parameters: { type: 'object', properties: {} },
     },
     async run(ctx) {
@@ -770,6 +790,11 @@ export const TOOLS: Tool[] = [
           daily_at: { type: 'string', description: 'HH:MM, 24h' },
           weekdays_at: { type: 'string', description: 'HH:MM, Monday to Friday only' },
           weekly_on: { type: 'string', description: 'e.g. "mon 09:00"' },
+          webhook: {
+            type: 'boolean',
+            description:
+              'Instead of a schedule, fire when something calls in. Halo returns a loopback URL to give the user; anything that can POST to it starts this routine.',
+          },
         },
         required: ['name', 'prompt'],
       },
@@ -777,7 +802,7 @@ export const TOOLS: Tool[] = [
     surface: 'agent_write',
     async run(ctx, args) {
       const trigger = parseTrigger(args);
-      if (!trigger) return { output: 'Give one of every_minutes, daily_at, weekdays_at or weekly_on.', isError: true };
+      if (!trigger) return { output: 'Give one of every_minutes, daily_at, weekdays_at, weekly_on, or webhook: true.', isError: true };
       const routine: Routine = {
         id: randomUUID(),
         agentId: ctx.agentId,
@@ -998,8 +1023,24 @@ export const TOOLS: Tool[] = [
 
   {
     schema: {
+      name: 'MessageSubagent',
+      description:
+        'Correct or narrow a background worker that is already running. It reads this before its next step and keeps everything it has done so far — which is why this beats stopping it and dispatching a new one.',
+      parameters: {
+        type: 'object',
+        properties: { task_id: { type: 'string' }, text: { type: 'string', description: 'The correction, in one or two sentences.' } },
+        required: ['task_id', 'text'],
+      },
+    },
+    async run(ctx, args) {
+      return { output: ctx.runner.messageSubagent(str(args.task_id), str(args.text)) };
+    },
+  },
+
+  {
+    schema: {
       name: 'StopSubagent',
-      description: 'Abort a background worker that is wedged or no longer needed.',
+      description: 'Abort a background worker that is wedged or no longer needed. Prefer MessageSubagent when it only needs redirecting.',
       parameters: { type: 'object', properties: { task_id: { type: 'string' } }, required: ['task_id'] },
     },
     async run(ctx, args) {
@@ -1021,9 +1062,232 @@ export const TOOLS: Tool[] = [
       return { output: clip(await ctx.awaitBackground(str(args.shell_id), num(args.timeout_ms, 120_000))) };
     },
   },
+
+
+  // ---- the user's own automation -------------------------------------------------
+  //
+  // Halo will never have a Calendar tool, a Notion tool and a Shopify tool that are as good as the
+  // real ones. A lot of people already keep those, wired up and authorised, in an n8n instance. A bot
+  // that can read, write and fire an n8n workflow inherits every service they have already connected,
+  // and the credentials stay in n8n rather than arriving here. See host/n8n.ts.
+
+  {
+    schema: {
+      name: 'N8nWorkflows',
+      description:
+        "List the workflows on the user's n8n, with their ids and whether they are active. Read this before " +
+        'you touch anything: the id is what every other n8n tool takes.',
+      parameters: { type: 'object', properties: {} },
+    },
+    async run(ctx) {
+      return { output: clip(await listWorkflows(ctx.store.getSettings(), ctx.signal)) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'N8nWorkflow',
+      description:
+        'Read one workflow as JSON — its nodes, its connections and its webhook paths. Read it before you edit ' +
+        'it, and send the whole thing back to N8nSaveWorkflow so you change it rather than replace it.',
+      parameters: { type: 'object', properties: { workflow_id: { type: 'string' } }, required: ['workflow_id'] },
+    },
+    async run(ctx, args) {
+      return { output: clip(await getWorkflow(ctx.store.getSettings(), str(args.workflow_id), ctx.signal)) };
+    },
+  },
+
+  {
+    schema: {
+      name: 'N8nSaveWorkflow',
+      description:
+        "Create a workflow on the user's n8n, or replace an existing one. Needs approval. The workflow is n8n's " +
+        'own JSON: nodes and connections. A new one arrives inactive — say so, and let the user activate it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          workflow: { type: 'string', description: "The workflow JSON: { name, nodes, connections }." },
+          name: { type: 'string', description: 'Overrides the name inside the JSON.' },
+          workflow_id: { type: 'string', description: 'Set to replace an existing workflow; omit to create one.' },
+        },
+        required: ['workflow'],
+      },
+    },
+    surface: 'automation',
+    async run(ctx, args) {
+      return {
+        output: await saveWorkflow(
+          ctx.store.getSettings(),
+          {
+            workflow: str(args.workflow),
+            ...(str(args.name) ? { name: str(args.name) } : {}),
+            ...(str(args.workflow_id) ? { workflowId: str(args.workflow_id) } : {}),
+          },
+          ctx.signal,
+        ),
+      };
+    },
+  },
+
+  {
+    schema: {
+      name: 'N8nActivateWorkflow',
+      description: 'Turn a workflow on or off. Needs approval: an active workflow keeps running after you stop.',
+      parameters: {
+        type: 'object',
+        properties: { workflow_id: { type: 'string' }, active: { type: 'boolean' } },
+        required: ['workflow_id'],
+      },
+    },
+    surface: 'automation',
+    async run(ctx, args) {
+      return {
+        output: await activateWorkflow(ctx.store.getSettings(), str(args.workflow_id), args.active !== false, ctx.signal),
+      };
+    },
+  },
+
+  {
+    schema: {
+      name: 'N8nRunWorkflow',
+      description:
+        'Fire a workflow by calling its webhook, and get back what it answered. Needs approval. n8n has no ' +
+        '"run this" API — a workflow starts from its trigger — so this only works on one with a Webhook node, ' +
+        'and the path is the one that node shows.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'The webhook path from the Webhook node, or a full url.' },
+          method: { type: 'string', description: 'POST unless the node says otherwise.' },
+          body: { type: 'string', description: 'JSON body to send.' },
+          test: { type: 'boolean', description: 'Use the test webhook, which needs "Test workflow" pressed in n8n.' },
+        },
+        required: ['path'],
+      },
+    },
+    surface: 'automation',
+    async run(ctx, args) {
+      return {
+        output: clip(
+          await runWorkflow(
+            ctx.store.getSettings(),
+            {
+              path: str(args.path),
+              ...(str(args.method) ? { method: str(args.method) } : {}),
+              ...(str(args.body) ? { body: str(args.body) } : {}),
+              ...(args.test === true ? { test: true } : {}),
+            },
+            ctx.signal,
+          ),
+        ),
+      };
+    },
+  },
+
+  {
+    schema: {
+      name: 'N8nExecutions',
+      description: 'Recent executions, newest first — how you check whether the workflow you built actually ran.',
+      parameters: { type: 'object', properties: { workflow_id: { type: 'string' } } },
+    },
+    async run(ctx, args) {
+      return {
+        output: clip(await listExecutions(ctx.store.getSettings(), str(args.workflow_id) || undefined, ctx.signal)),
+      };
+    },
+  },
+
+  {
+    schema: {
+      name: 'SelfCheck',
+      description:
+        'Probe the things that break Halo silently — model server, your box, browser, plugins, disk — and get one PASS/FAIL line each. Run this first when something is wrong, before guessing.',
+      parameters: { type: 'object', properties: {} },
+    },
+    async run(ctx) {
+      return { output: await selfCheck(ctx) };
+    },
+  },
 ];
 
+/**
+ * Halo's answer to Grok Bot's `box-doctor` (docs/GROK_BOT_0.24_0.27_TEARDOWN.md §11.3): one command
+ * that probes the handful of things whose failure looks like a dozen unrelated failures, and prints a
+ * line per check that a bot can quote to the user instead of speculating.
+ */
+async function selfCheck(ctx: ToolContext): Promise<string> {
+  const lines: string[] = [];
+  const say = (ok: boolean, name: string, detail: string) => lines.push(`[selfcheck] ${ok ? 'PASS' : 'FAIL'} ${name}: ${detail}`);
+  const settings = ctx.store.getSettings();
+
+  // The model server, which is the cause far more often than anything else here.
+  const model = settings.provider.model.trim();
+  if (!model) {
+    say(false, 'model', 'no model chosen — Settings → Model');
+  } else {
+    try {
+      const models = await listModels(settings.provider);
+      const known = models.length === 0 || models.includes(model);
+      say(known, 'model', known ? `${model} at ${settings.provider.baseUrl}` : `${settings.provider.baseUrl} answers but does not serve ${model}`);
+    } catch (error) {
+      say(false, 'model', `${settings.provider.baseUrl} unreachable — ${String((error as Error)?.message ?? error).slice(0, 120)}`);
+    }
+  }
+
+  // The box: writable, and holding the reference docs the bot is told to read.
+  const box = ctx.store.boxDir(ctx.agentId);
+  try {
+    const probe = join(box, `.selfcheck-${randomUUID().slice(0, 8)}`);
+    writeFileSync(probe, 'ok', 'utf8');
+    rmSync(probe, { force: true });
+    say(true, 'box', box);
+  } catch (error) {
+    say(false, 'box', `cannot write ${box} — ${String((error as Error)?.message ?? error).slice(0, 120)}`);
+  }
+  const refs = referenceFiles().filter((name) => existsSync(join(box, REFERENCE_DIR, name)));
+  say(refs.length === referenceFiles().length, 'reference', refs.length ? `${REFERENCE_DIR}/: ${refs.join(', ')}` : 'missing');
+
+  // Free space, because a box that cannot write fails in a dozen unrelated-looking ways.
+  try {
+    const fs = statfsSync(box);
+    const freeGb = (fs.bavail * fs.bsize) / 1024 ** 3;
+    say(freeGb > 1, 'disk', `${freeGb.toFixed(1)} GB free`);
+  } catch {
+    say(true, 'disk', 'not reported on this volume');
+  }
+
+  // The browser view, which is started on demand and can fail long before anyone clicks anything.
+  try {
+    await ctx.computer.ensure(ctx.agentId);
+    say(true, 'browser', 'window ready');
+  } catch (error) {
+    say(false, 'browser', String((error as Error)?.message ?? error).slice(0, 160));
+  }
+
+  // The automation the bots may have been told to use, if the user connected one.
+  if (settings.n8n?.enabled) {
+    const probe = await probeN8n(settings);
+    say(probe.ok, 'n8n', probe.detail);
+  }
+
+  const plugins = ctx.pluginStatus?.() ?? [];
+  if (plugins.length === 0) {
+    say(true, 'plugins', 'none installed');
+  } else {
+    for (const plugin of plugins) {
+      say(plugin.state === 'ready', `plugin:${plugin.name}`, plugin.state === 'ready' ? `${plugin.toolCount} tools` : `${plugin.state}${plugin.error ? ` — ${plugin.error.slice(0, 120)}` : ''}`);
+    }
+  }
+
+  const failed = lines.filter((l) => l.includes('] FAIL ')).length;
+  lines.push(`[selfcheck] SUMMARY ${lines.length - failed} passed, ${failed} failed`);
+  return lines.join('\n');
+}
+
 export function parseTrigger(args: Record<string, unknown>): RoutineTrigger | null {
+  // A webhook routine waits to be called rather than watching the clock; the token is its whole address,
+  // so it is generated here and never taken from the model.
+  if (args.webhook === true) return { kind: 'webhook', token: randomUUID().replace(/-/g, '') };
   if (typeof args.every_minutes === 'number' && args.every_minutes > 0) return { kind: 'interval', everyMinutes: args.every_minutes };
 
   const weekdays = str(args.weekdays_at);
@@ -1048,6 +1312,7 @@ export function parseTrigger(args: Record<string, unknown>): RoutineTrigger | nu
 }
 
 export function describeTrigger(t: RoutineTrigger): string {
+  if (t.kind === 'webhook') return 'when its webhook is called';
   if (t.kind === 'interval') return `every ${t.everyMinutes} min`;
   const hh = String(t.hour).padStart(2, '0');
   const mm = String(t.minute).padStart(2, '0');
