@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boxHelper, confineBox, verifyConfinement } from './box.ts';
@@ -56,7 +56,8 @@ test('a box command gets a scratch folder it can write, inside its box', { skip 
   const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
   assert.ok(confineBox(box));
   const out = inBoxScript(box, 'Split-Path ([IO.Path]::GetTempFileName()) -Parent');
-  assert.equal(out.toLowerCase(), join(box, '.tmp').toLowerCase());
+  // Compared as real paths: CI's temp folder has an 8.3 short name that .NET expands.
+  assert.equal(realpathSync.native(out).toLowerCase(), realpathSync.native(join(box, '.tmp')).toLowerCase());
 });
 
 test("a box command cannot see the windows on the user's desktop", { skip }, () => {
