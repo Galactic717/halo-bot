@@ -15,11 +15,11 @@
     "dev": "node scripts/dev.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test host/halo.test.ts",
+    "test": "node --test host/halo.test.ts host/box.test.ts",
     "verify": "node scripts/verify.mts",
     "icon": "node scripts/make-icon.mjs",
     "icons:brands": "node scripts/make-brand-icons.mjs",
-    "package": "npm run build && electron-builder --win --x64",
+    "package": "node scripts/build-native.mjs --strict && npm run build:main && npm run build:renderer && electron-builder --win --x64",
     "build:native": "node scripts/build-native.mjs",
     "icons:android": "node scripts/make-android-icons.mjs"
   },

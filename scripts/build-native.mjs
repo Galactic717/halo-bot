@@ -3,31 +3,33 @@ import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * Builds the box confinement helper.
+ * Builds the box confinement helper from source and stages it in build/.
  *
- * Skipped rather than fatal when cargo is missing: `runShell` falls back to plain PowerShell without
- * it, which is how the app behaved before the helper existed. A build that refuses to produce an app
- * because one optional binary could not be compiled is worse than an app that says, on its About
- * screen, that the boundary is not in force.
+ * `--strict` (CI and `npm run package`) turns every failure into a non-zero exit: a package built
+ * without the helper would ship a bot shell with the user's full rights. Without the flag a missing
+ * cargo only warns, so `npm run dev` still starts on a machine that has no Rust toolchain.
  */
+const strict = process.argv.includes('--strict');
 const crate = join(process.cwd(), 'native', 'halo-box');
 const out = join(crate, 'target', 'release', 'halo-box.exe');
+
+function giveUp(message) {
+  if (strict) {
+    console.error(`[native] ${message}`);
+    process.exit(1);
+  }
+  console.warn(`[native] ${message} — a bot's shell will run unconfined`);
+  process.exit(0);
+}
 
 if (process.platform !== 'win32') {
   console.log('[native] not Windows — the box helper is Windows-only, skipping');
   process.exit(0);
 }
 
-const cargo = spawnSync('cargo', ['build', '--release', '--offline'], { cwd: crate, stdio: 'inherit', shell: true });
-if (cargo.status !== 0) {
-  console.warn('[native] cargo build failed or cargo is not installed — the box will run unconfined');
-  process.exit(0);
-}
-
-if (!existsSync(out)) {
-  console.warn('[native] cargo reported success but produced no binary — the box will run unconfined');
-  process.exit(0);
-}
+const cargo = spawnSync('cargo', ['build', '--release', '--offline'], { cwd: crate, stdio: 'inherit' });
+if (cargo.status !== 0) giveUp('cargo build failed or cargo is not installed');
+if (!existsSync(out)) giveUp('cargo reported success but produced no binary');
 
 // Copied next to the built main process so a packaged app and `npm start` find it the same way.
 mkdirSync(join(process.cwd(), 'build'), { recursive: true });

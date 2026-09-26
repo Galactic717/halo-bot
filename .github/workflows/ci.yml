@@ -17,12 +17,16 @@ jobs:
     name: Windows — typecheck, tests, end to end
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # Built from source before anything runs, so the tests assert the helper this commit's main.rs
+      # produces rather than whatever binary happened to be lying around.
+      - name: Box helper
+        run: node scripts/build-native.mjs --strict
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests
@@ -36,12 +40,13 @@ jobs:
     name: Android — JVM tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      # The runner image ships an Android SDK with ANDROID_HOME set. setup-android@v3 replaced it with
+      # cmdline-tools 16 and then failed on unaccepted add-on licenses, so the image's SDK is used as is.
       - name: Unit tests
         working-directory: android
         run: ./gradlew :app:testDebugUnitTest --no-daemon

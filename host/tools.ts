@@ -133,6 +133,8 @@ const SHELL_ENV_NAMES = [
   'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'NUMBER_OF_PROCESSORS',
   'PROCESSOR_ARCHITECTURE', 'OS', 'USERNAME', 'COMPUTERNAME', 'LANG', 'LC_ALL',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  // Where PowerShell keeps its module analysis; the box helper seeds its own cache from it.
+  'PSModuleAnalysisCachePath',
 ];
 
 export function shellEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -179,17 +181,15 @@ export function runShell(
       return;
     }
     const helper = confined && canConfine(cwd, process.resourcesPath) ? boxHelper(process.resourcesPath) : null;
+    // stdin is NUL: nobody can type into a bot's shell, so a command that reads input (Read-Host, a
+    // REPL, an installer's prompt) gets end-of-file at once instead of hanging until the timeout.
+    const base = { cwd, windowsHide: true, env: shellEnvironment() };
     const child = helper
-      ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], {
-          cwd,
-          windowsHide: true,
-          env: shellEnvironment(),
-        })
-      : spawn(
-          'powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
-          { cwd, windowsHide: true, env: shellEnvironment() },
-        );
+      ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], { ...base, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+          ...base,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
     let out = '';
     const push = (b: Buffer) => {
       out += b.toString('utf8');
