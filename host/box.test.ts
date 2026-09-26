@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boxHelper, confineBox, verifyConfinement } from './box.ts';
@@ -44,4 +44,31 @@ test('a box command can still write inside its own box', { skip }, () => {
   assert.ok(confineBox(box));
   const out = inBox(box, "Set-Content -Path inside.txt -Value ok; Get-Content inside.txt");
   assert.equal(out, 'ok');
+});
+
+/** Runs a PowerShell script from a file in the box, which sidesteps quoting it through argv. */
+function inBoxScript(box: string, script: string): string {
+  writeFileSync(join(box, 'probe.ps1'), script);
+  return inBox(box, '& .\\probe.ps1');
+}
+
+test('a box command gets a scratch folder it can write, inside its box', { skip }, () => {
+  const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
+  assert.ok(confineBox(box));
+  const out = inBoxScript(box, '$f = New-TemporaryFile; Split-Path $f -Parent');
+  assert.equal(out.toLowerCase(), join(box, '.tmp').toLowerCase());
+});
+
+test("a box command cannot see the windows on the user's desktop", { skip }, () => {
+  const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
+  assert.ok(confineBox(box));
+  const out = inBoxScript(
+    box,
+    [
+      `Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern System.IntPtr FindWindow(string c, string w);'`,
+      `[W.U]::FindWindow("Shell_TrayWnd", $null)`,
+    ].join('\n'),
+  );
+  // The taskbar lives on the user's desktop; from the box's own desktop there is nothing to find.
+  assert.equal(out, '0');
 });
