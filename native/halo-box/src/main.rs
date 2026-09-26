@@ -579,6 +579,12 @@ fn main() {
 
         let mut code: Dword = 0;
         GetExitCodeProcess(info.process, &mut code);
+        // An NTSTATUS error means the shell died before running anything (a DLL that would not
+        // initialise, an access violation in start-up). Without this line the bot sees an empty
+        // result and has no idea the command never ran.
+        if code >= 0xC000_0000 {
+            eprintln!("halo-box: the shell failed to start (NTSTATUS 0x{code:08X}); the command did not run");
+        }
         CloseHandle(info.thread);
         CloseHandle(info.process);
         CloseHandle(job);
