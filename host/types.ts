@@ -253,6 +253,20 @@ export interface AuditRow {
   failure?: string;
   /** Present when the decision was recorded but not enforced, because the policy is in dry-run. */
   dryRun?: boolean;
+  /** The previous row's `hash`, chaining the trail so an edited or deleted row shows. */
+  prev?: string;
+  /** SHA-256 over `prev` and this row's other fields. */
+  hash?: string;
+}
+
+/** What walking the chain found. */
+export interface AuditVerdict {
+  intact: boolean;
+  /** Rows checked, oldest kept generation first. */
+  rows: number;
+  /** Where it broke, counted from the oldest kept row, and why. */
+  brokenAt?: number;
+  reason?: string;
 }
 
 export interface Settings {

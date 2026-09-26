@@ -1,7 +1,8 @@
 // The decide-record-act ordering is adapted from OpenBot (MIT, (c) 2026 CopilotKit). See NOTICE.
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AuditRow } from './types.ts';
+import type { AuditRow, AuditVerdict } from './types.ts';
 
 /**
  * What each bot was allowed to do, what it was refused, and what then failed.
@@ -14,9 +15,25 @@ import type { AuditRow } from './types.ts';
  * A permitted action that then failed gets a second row rather than an edit, because "allowed" and
  * "happened" are different facts and a reader will otherwise take the first for the second.
  *
+ * Each row carries the hash of the one before it, so a row edited, deleted or inserted afterwards
+ * breaks the chain and `verify()` says where. That makes the trail tamper-*evident*, not
+ * tamper-proof: a process with the user's rights can rewrite the whole file and recompute every
+ * hash. A bot's own shell cannot — its AppContainer has no access to Halo's data directory — which
+ * is the case the trail exists for.
+ *
  * ponytail: append-only JSONL with a size roll. One machine, one person. If this ever needs
  * filtering by more than the loaded window, it wants SQLite, not a bigger read.
  */
+
+/** The chain's anchor before any row exists. */
+const GENESIS = '0'.repeat(64);
+
+/** The hash of a row: over its predecessor's hash and every other field, in a fixed key order. */
+export function hashRow(row: AuditRow, prev: string): string {
+  const { hash: _hash, prev: _prev, ...fields } = row;
+  const canonical = JSON.stringify(fields, Object.keys(fields).sort());
+  return createHash('sha256').update(prev).update('\n').update(canonical).digest('hex');
+}
 
 /** Rolled at this size so the file can always be read into memory to be searched. */
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -55,9 +72,28 @@ export function scrub(text: string): string {
 
 export class AuditLog {
   private path: string;
+  /** The last row's hash; read from disk once, so a restart continues the chain rather than forking it. */
+  private last: string | null = null;
 
   constructor(root: string) {
     this.path = join(root, 'audit.jsonl');
+  }
+
+  private lastHash(): string {
+    if (this.last !== null) return this.last;
+    for (const path of [this.path, `${this.path}.1`]) {
+      if (!existsSync(path)) continue;
+      const lines = readFileSync(path, 'utf8').trimEnd().split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const row = JSON.parse(lines[i]!) as AuditRow;
+          if (row.hash) return (this.last = row.hash);
+        } catch {
+          /* a torn last line; look one further back */
+        }
+      }
+    }
+    return (this.last = GENESIS);
   }
 
   /** Writes one row. Never throws: a trail that cannot be written must not stop the decision. */
@@ -68,13 +104,53 @@ export class AuditLog {
       detail: scrub(row.detail).slice(0, 2000),
       ...(row.failure ? { failure: scrub(row.failure).slice(0, 400) } : {}),
     };
+    clean.prev = this.lastHash();
+    clean.hash = hashRow(clean, clean.prev);
     try {
       this.roll();
       appendFileSync(this.path, `${JSON.stringify(clean)}\n`, 'utf8');
+      this.last = clean.hash;
     } catch {
       /* a full or locked disk is not a reason to stop deciding */
     }
     return clean;
+  }
+
+  /**
+   * Walks the chain from the oldest kept row to the newest and says whether it holds.
+   *
+   * The oldest kept row's `prev` points into a generation that has been rolled away, so it is taken
+   * as given; every link after it is checked. Rows written before the chain existed have no hash and
+   * are skipped until the first one that does.
+   */
+  verify(): AuditVerdict {
+    let prev: string | null = null;
+    let rows = 0;
+    for (const path of [`${this.path}.1`, this.path]) {
+      if (!existsSync(path)) continue;
+      for (const line of readFileSync(path, 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        rows += 1;
+        let row: AuditRow;
+        try {
+          row = JSON.parse(line) as AuditRow;
+        } catch {
+          return { intact: false, rows, brokenAt: rows, reason: 'a row is not valid JSON' };
+        }
+        if (!row.hash) {
+          if (prev === null) continue;
+          return { intact: false, rows, brokenAt: rows, reason: 'a row has no hash after the chain began' };
+        }
+        if (prev !== null && row.prev !== prev) {
+          return { intact: false, rows, brokenAt: rows, reason: 'a row does not follow the one before it (one was removed or inserted)' };
+        }
+        if (hashRow(row, row.prev ?? '') !== row.hash) {
+          return { intact: false, rows, brokenAt: rows, reason: 'a row was changed after it was written' };
+        }
+        prev = row.hash;
+      }
+    }
+    return { intact: true, rows };
   }
 
   /** Keeps one generation, so a roll never silently discards the week somebody is looking for. */
