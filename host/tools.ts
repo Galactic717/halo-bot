@@ -133,6 +133,8 @@ const SHELL_ENV_NAMES = [
   'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'NUMBER_OF_PROCESSORS',
   'PROCESSOR_ARCHITECTURE', 'OS', 'USERNAME', 'COMPUTERNAME', 'LANG', 'LC_ALL',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  // Where PowerShell keeps its module analysis; the box helper seeds its own cache from it.
+  'PSModuleAnalysisCachePath',
 ];
 
 export function shellEnvironment(source: NodeJS.ProcessEnv = process.env): Record<string, string> {

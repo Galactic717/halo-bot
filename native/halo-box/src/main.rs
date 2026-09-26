@@ -587,8 +587,21 @@ fn main() {
                 // PowerShell resolves commands from a module-analysis cache under %LOCALAPPDATA%,
                 // which a Low process can read but not write. Where that cache is missing or stale
                 // it rebuilt the analysis on every command and threw it away: ~20-30 s before each
-                // box command ran. A cache inside the box is built once and kept.
-                std::env::set_var("PSModuleAnalysisCachePath", format!("{scratch}\\ModuleAnalysisCache"));
+                // box command ran. A cache inside the box is built once and kept — and seeded from
+                // the user's own cache when there is one, so a new bot's first command does not pay
+                // for analysing every installed module either.
+                let cache = format!("{scratch}\\ModuleAnalysisCache");
+                if !std::path::Path::new(&cache).exists() {
+                    let seed = std::env::var("PSModuleAnalysisCachePath").ok().or_else(|| {
+                        std::env::var("LOCALAPPDATA")
+                            .ok()
+                            .map(|local| format!("{local}\\Microsoft\\Windows\\PowerShell\\ModuleAnalysisCache"))
+                    });
+                    if let Some(seed) = seed {
+                        let _ = std::fs::copy(seed, &cache);
+                    }
+                }
+                std::env::set_var("PSModuleAnalysisCachePath", cache);
             }
         }
 
