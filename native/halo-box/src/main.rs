@@ -607,12 +607,13 @@ fn prepare_scratch(box_dir: &str) {
     std::env::set_var("TMP", &scratch);
     let cache = format!("{scratch}\\ModuleAnalysisCache");
     if !std::path::Path::new(&cache).exists() {
-        let seed = std::env::var("PSModuleAnalysisCachePath").ok().or_else(|| {
-            std::env::var("LOCALAPPDATA")
-                .ok()
-                .map(|local| format!("{local}\\Microsoft\\Windows\\PowerShell\\ModuleAnalysisCache"))
-        });
-        if let Some(seed) = seed {
+        // Windows PowerShell's own cache first. A PSModuleAnalysisCachePath set for the machine may
+        // have been built against another module path (PowerShell 7's), so it is only a fallback.
+        let own = std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|local| format!("{local}\\Microsoft\\Windows\\PowerShell\\ModuleAnalysisCache"))
+            .filter(|path| std::path::Path::new(path).exists());
+        if let Some(seed) = own.or_else(|| std::env::var("PSModuleAnalysisCachePath").ok()) {
             let _ = std::fs::copy(seed, &cache);
         }
     }
@@ -626,6 +627,11 @@ fn prepare_scratch(box_dir: &str) {
 /// PowerShell starts in C:\, where every relative path then lands. A drive rooted at the box has
 /// only one folder to check, the box itself. Absolute paths inside the box still work, and native
 /// programs get the real path as their working directory.
+///
+/// The two core modules are imported from $PSHOME by path first. Inside the container PowerShell
+/// cannot find the user's Documents folder and cannot trust a cache built for another module path,
+/// so autoloading them could fail and `New-PSDrive` — or a bot's own `Get-Content` — would be "not
+/// recognized". Loaded explicitly they cost ~80 ms and depend on nothing.
 fn box_location(box_dir: &str, cwd: &str) -> String {
     let root = box_dir.trim_end_matches('\\');
     let inside = cwd
@@ -636,7 +642,7 @@ fn box_location(box_dir: &str, cwd: &str) -> String {
         .trim_start_matches('\\');
     let quote = |s: &str| s.replace('\'', "''");
     format!(
-        "$null = New-PSDrive -Name Box -PSProvider FileSystem -Root '{}'; Set-Location -LiteralPath 'Box:\\{}';",
+        "Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Management\", \"$PSHOME\\Modules\\Microsoft.PowerShell.Utility\"; $null = New-PSDrive -Name Box -PSProvider FileSystem -Root '{}'; Set-Location -LiteralPath 'Box:\\{}';",
         quote(root),
         quote(inside)
     )
