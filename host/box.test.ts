@@ -5,6 +5,7 @@ import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boxHelper, confineBox, verifyConfinement } from './box.ts';
+import { runShell } from './tools.ts';
 
 /**
  * The box, asserted against the real kernel rather than described.
@@ -72,4 +73,14 @@ test("a box command cannot see the windows on the user's desktop", { skip }, () 
   );
   // The taskbar lives on the user's desktop; from the box's own desktop there is nothing to find.
   assert.equal(out, '0');
+});
+
+test('the shell a bot actually gets runs a command in its box', { skip, timeout: 120_000 }, async () => {
+  const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
+  const started = Date.now();
+  const result = await runShell('Write-Output hello', box, new AbortController().signal, 100_000, true);
+  const took = Date.now() - started;
+  assert.equal(result.out.trim(), 'hello', `exit ${result.code} after ${took}ms: ${result.out.slice(0, 300)}`);
+  // A box command that takes this long is a start-up cost every tool call pays.
+  assert.ok(took < 10_000, `the box shell took ${took}ms to say hello`);
 });
