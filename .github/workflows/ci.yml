@@ -23,6 +23,10 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # Built from source before anything runs, so the tests assert the helper this commit's main.rs
+      # produces rather than whatever binary happened to be lying around.
+      - name: Box helper
+        run: node scripts/build-native.mjs --strict
       - name: Typecheck
         run: npm run typecheck
       - name: Unit tests

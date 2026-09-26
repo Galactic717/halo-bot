@@ -11,5 +11,10 @@ android/app/build/
 android/local.properties
 android/.kotlin/
 
-# The box helper's build tree; the staged binary in build/ is what packaging uses.
+# The box helper's build tree, and the binary `npm run build:native` stages from it. The binary is
+# built from source on every machine and in CI; a committed copy could not be checked against main.rs.
 native/halo-box/target/
+build/halo-box.exe
+
+# Local working notes and reference material that never ship.
+.local/
