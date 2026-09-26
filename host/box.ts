@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -96,6 +96,17 @@ export function confinementProblem(
   if (!helper) return 'the confinement helper (halo-box.exe) is missing from this install';
   if (!confineBox(dir)) return "the box folder could not be labelled Low integrity";
   return null;
+}
+
+/**
+ * Deletes a box's AppContainer profile, for a bot that is being deleted.
+ *
+ * The profile is the container's identity and its private folders under %LOCALAPPDATA%\Packages;
+ * left behind, a later box at the same path would inherit whatever the old bot stored there.
+ */
+export function forgetBox(dir: string, resourcesPath?: string): void {
+  const helper = process.platform === 'win32' ? boxHelper(resourcesPath) : null;
+  if (helper) spawnSync(helper, ['--forget', dir], { windowsHide: true });
 }
 
 export interface Confinement {

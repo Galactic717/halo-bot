@@ -163,8 +163,10 @@ export function runShell(
   cwd: string,
   signal: AbortSignal,
   timeoutMs = 120_000,
-  confined = false,
+  /** The bot's box, when the command is the bot's own: it then runs in that box's AppContainer. */
+  box?: { dir: string; network?: boolean },
 ): Promise<{ code: number; out: string }> {
+  const confined = box !== undefined;
   return new Promise((resolveP) => {
     /*
      * A box is Halo's to create; the user's machine is not.
@@ -176,7 +178,7 @@ export function runShell(
      */
     if (confined) {
       mkdirSync(cwd, { recursive: true });
-      const problem = confinementProblem(cwd, process.resourcesPath);
+      const problem = confinementProblem(box.dir, process.resourcesPath);
       if (problem) {
         resolveP({
           code: -1,
@@ -192,7 +194,7 @@ export function runShell(
     // REPL, an installer's prompt) gets end-of-file at once instead of hanging until the timeout.
     const base = { cwd, windowsHide: true, env: shellEnvironment() };
     const child = confined
-      ? spawn(boxHelper(process.resourcesPath)!, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], {
+      ? spawn(boxHelper(process.resourcesPath)!, ['--box', box.dir, '--cwd', cwd, ...(box.network ? ['--network'] : []), '--timeout-ms', String(timeoutMs), '--', command], {
           ...base,
           stdio: ['ignore', 'pipe', 'pipe'],
         })
@@ -318,7 +320,8 @@ export const TOOLS: Tool[] = [
   {
     schema: {
       name: 'Shell',
-      description: 'Run a PowerShell command on your own computer (your box). Use it for anything scriptable: files, git, python, curl.',
+      description:
+        "Run a PowerShell command in your box: your own sandboxed folder and shell. Use it for anything scriptable: files, git, python. It cannot see the user's files or other bots' boxes, and it has no network unless the user turned it on for you — use the browser and fetch tools for the web.",
       parameters: {
         type: 'object',
         properties: {
@@ -341,7 +344,8 @@ export const TOOLS: Tool[] = [
         const id = ctx.startBackground(str(args.command), cwd, true);
         return { output: `Started in the background as ${id}. Keep working; you will be told when it finishes.` };
       }
-      const { code, out } = await runShell(str(args.command), cwd, ctx.signal, num(args.timeout_ms, 120_000), true);
+      const box = { dir: ctx.store.boxDir(ctx.agentId), network: ctx.store.getAgent(ctx.agentId)?.boxNetwork === true };
+      const { code, out } = await runShell(str(args.command), cwd, ctx.signal, num(args.timeout_ms, 120_000), box);
       return { output: clip(`exit ${code}\n${out || '(no output)'}`), isError: code !== 0 };
     },
   },

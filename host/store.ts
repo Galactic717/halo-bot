@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rea
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Agent, Channel, Message, Routine, Settings, UsageRow } from './types.ts';
+import { forgetBox } from './box.ts';
 
 // ponytail: flat JSON + JSONL transcripts. One user, a few thousand messages.
 // Swap in SQLite only when a single agent's transcript stops fitting in memory.
@@ -267,6 +268,7 @@ export class Store {
     for (const key of [...this.llm.keys()]) if (key === id || key.startsWith(`${id}#`)) this.llm.delete(key);
     for (const r of [...this.routines.values()]) if (r.agentId === id) this.routines.delete(r.id);
     this.saveRoutines();
+    forgetBox(this.boxDir(id));
     rmSync(this.agentDir(id), { recursive: true, force: true });
   }
 
