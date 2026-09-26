@@ -786,6 +786,21 @@ function AgentSettings({
             </select>
           </div>
 
+          <div className="setting-row">
+            <div className="setting-row__text">
+              <div>Network in its box</div>
+              <div className="setting-row__desc">
+                Off keeps anything it reads from being sent out by its shell. Turn on for installs and downloads.
+              </div>
+            </div>
+            <button
+              className="switch"
+              data-on={agent.boxNetwork === true}
+              aria-label="Network in its box"
+              onClick={() => void onUpdateAgent({ boxNetwork: !agent.boxNetwork })}
+            />
+          </div>
+
           <div className="setting-row" style={{ display: 'block' }}>
             <div className="setting-row__text">
               <div>Folders it may use freely</div>

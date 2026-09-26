@@ -26,6 +26,11 @@ export interface Agent {
   /** Folders on the user's machine this bot may work in without asking each time. */
   allowedPaths?: string[];
   /**
+   * Lets this bot's shell reach the network. Off by default: whatever a bot reads — a web page, a
+   * file, a plugin's reply — cannot be sent anywhere from its shell. The browser is gated separately.
+   */
+  boxNetwork?: boolean;
+  /**
    * An AG-UI endpoint that runs this bot's turns instead of Halo's own loop.
    *
    * The agent on the other end can be written on any framework. It is offered Halo's toolset and

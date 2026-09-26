@@ -295,6 +295,9 @@ async function main() {
   model.server.close();
   worker.server.close();
   store.flush();
+  // Every bot made here, deleted the way the app deletes one — which also removes its box's
+  // AppContainer profile rather than leaving one behind per run.
+  for (const made of store.listAgents()) store.deleteAgent(made.id);
   rmSync(root, { recursive: true, force: true });
 
   if (failures > 0) {

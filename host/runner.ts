@@ -558,7 +558,8 @@ export class Runner implements RunnerPort {
   private startBackground(agentId: string, command: string, cwd: string, confined = false): string {
     const id = `sh_${Math.random().toString(36).slice(2, 8)}`;
     const controller = new AbortController();
-    const promise = runShell(command, cwd, controller.signal, 30 * 60_000, confined);
+    const box = confined ? { dir: this.store.boxDir(agentId), network: this.store.getAgent(agentId)?.boxNetwork === true } : undefined;
+    const promise = runShell(command, cwd, controller.signal, 30 * 60_000, box);
     const entry = { promise, done: false, command, agentId, startedAt: Date.now() };
     this.background.set(id, entry);
     void promise.then(({ code, out }) => {
