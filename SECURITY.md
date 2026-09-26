@@ -26,9 +26,12 @@ The boundaries this project claims, which are the ones worth attacking:
 | Claim | Where it lives |
 |---|---|
 | The hardline floor refuses whatever the settings say | `host/policy.ts` `HARDLINE`, `core/Policy.kt` |
-| A bot's box cannot be written out of | `native/halo-box`, `host/box.ts` |
+| A bot's shell cannot write outside its box, or read or write another bot's box (Windows) | `native/halo-box`, `host/box.ts`; tests in `host/box.test.ts` |
+| A bot's shell cannot read the user's files, and has no network unless that bot is given it (Windows) | the same AppContainer; `host/box.test.ts` |
+| A box command that cannot be confined is refused, never run with the user's rights | `host/tools.ts` `runShell`, `host/box.ts` `confinementProblem` |
 | Anything from outside is fenced and cannot forge the marker | `host/fence.ts`, `core/Fence.kt` |
 | Every gated action is recorded before it runs | `host/audit.ts`, `host/runner.ts` `gate` |
+| A row changed, removed or inserted in the trail afterwards is detected | `host/audit.ts` `verify` |
 | A `ref` resolves against the page Halo actually looked at | `electron/computer.ts`, `platform/Computer.kt` |
 | A bot cannot reach another bot's browser session | `electron/computer.ts` `partitionFor` |
 | Deny beats allow, and a broken rule refuses rather than opens | `host/policy.ts`, `host/expression.ts` |
@@ -62,7 +65,27 @@ The `master` branch. This is alpha software; there are no maintained release bra
   that matter.
 - The approval gate is one function, `Runner.gate`. Every path to a tool goes through it, including
   background workers. If you find a second path, that is a finding.
-- The Windows box is a boundary Halo constructs (Low integrity plus a job object) and reports on its
-  About screen; the Android box is the platform's. `verifyConfinement` in `host/box.ts` asks the
-  actual question — can a command started this way write outside its box — rather than trusting the
-  mechanism.
+- The Windows box is an AppContainer per bot plus a job object and a private desktop, built by
+  `native/halo-box`. Windows checks every access the shell makes twice — as the user and as that
+  bot's container — and the container is granted its own box and nothing of the user's. Each claim
+  in the table is a test in `host/box.test.ts` that runs the real helper against the kernel, and
+  `verifyConfinement` re-asks at startup rather than trusting the mechanism.
+
+## Known limits
+
+Stated so nobody has to discover them:
+
+- **The browser is not in the box.** A bot's browser can reach any site; it is gated by the approval
+  rules and Smart review, and its cookie jar is per bot, but a page it is allowed to open can carry
+  what the bot read. The shell being offline closes one exfiltration path, not all of them.
+- **Smart review is a model.** It sees rule-passing actions and can refuse them, but it is
+  probabilistic and can itself be argued with. It is a layer, not the boundary.
+- **The hardline floor is a pattern list.** It stops the obvious disasters with every switch turned
+  the wrong way; it is trivially bypassed by rewriting a command, which is why the box, not the list,
+  is the boundary for a bot's own shell.
+- **`ExternalShell` runs with the user's rights** once they approve it. That is its job.
+- **The trail is tamper-evident, not tamper-proof.** A process with the user's rights can rewrite
+  it and recompute every hash; a bot's container cannot reach it at all.
+- **Android's box is the app's sandbox, shared by every bot.** It keeps bots out of the rest of the
+  phone, but one bot's shell can read another bot's box and Halo's own data, and it has the app's
+  network access. Per-bot isolation there is not built yet.

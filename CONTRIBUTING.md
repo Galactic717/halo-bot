@@ -54,7 +54,7 @@ electron/   main process: window, IPC, the bot's browser, teach recorder, webhoo
 host/       agent runtime: store, provider, tools, policy, memory, skills, subagents,
             runner, scheduler, MCP, fence, compaction, expression, audit, personas, n8n
 src/        renderer: React
-native/     halo-box — a Rust helper that runs a box command at Low integrity in a job object
+native/     halo-box — a Rust helper that runs a box command in the bot's own AppContainer
 android/    core/ ports host/ · platform/ replaces electron/ · ui/ follows src/
 scripts/    build, icons, and verify.mts — the end-to-end harness
 docs/       reference teardowns, the Android notes, and a record of every pass over this code

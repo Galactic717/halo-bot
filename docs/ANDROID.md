@@ -25,12 +25,12 @@ a hop through a message channel would buy nothing but latency.
 
 ## What the platform changed, and why
 
-**The box is a real sandbox now.** On Windows the box is a folder Halo labels Low integrity and runs
-commands into through a helper process, because `Shell` is otherwise real PowerShell with the user's
-full rights. Here a command is a child of this app: it runs as this app's uid, inside the app
-sandbox, and the kernel refuses it every path outside Halo's own storage. The boundary the desktop
-build had to construct is the platform's default. `native/halo-box` has no counterpart and needs
-none.
+**The box is the app's sandbox, not the bot's.** On Windows each box is an AppContainer of its own,
+built by `native/halo-box`. Here a command is a child of this app: it runs as this app's uid, inside
+the app sandbox, and the kernel refuses it every path outside Halo's own storage — but every bot's
+shell shares that uid, so one bot can read another's box and Halo's data, and it has the app's
+network access. The desktop build is now the stronger of the two; per-bot isolation here (an
+`isolatedProcess` service is the candidate) is not built yet.
 
 **`ExternalShell` is gone.** There is no shell outside the app on an unrooted phone, so a tool that
 promised one would be a lie. What replaces it is narrower and honest: `ExternalRead`, `ExternalList`,

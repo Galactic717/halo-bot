@@ -321,9 +321,9 @@ function stripBox(text: string, boxDir: string): string {
 
 /**
  * True when a box command names something outside the box.
- * ponytail: text heuristic, not a sandbox. It makes an escape visible; it cannot prevent one, because
- * `Shell` is real PowerShell with the user's rights. Swap for a container or Windows Sandbox if the
- * box is ever meant to be a real boundary.
+ * A text heuristic, and only a label: it makes an attempt visible on the approval card and the trail.
+ * The boundary is the box's AppContainer (`native/halo-box`), which refuses the access whatever the
+ * command text says.
  */
 export function reachesOutsideBox(command: string, boxDir: string): boolean {
   const rest = stripBox(command, boxDir);

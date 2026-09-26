@@ -39,15 +39,15 @@ its own folder on disk, its own browser profile, its own permissions, and option
 You talk to it, it does the work, and next week it still knows what you told it.
 
 Bots are not sandboxed from *you* — they are sandboxed from **each other** and from the rest of your
-machine. A bot's shell runs at Low integrity inside a job object, so Windows itself refuses writes
-outside its box. Reaching onto your machine is a different surface with a different answer, and it
+machine. On Windows a bot's shell runs in an AppContainer of its own: it cannot read your files,
+cannot touch another bot's box, and has no network unless you give that bot one. Reaching onto your machine is a different surface with a different answer, and it
 goes through an approval gate that writes the row before it acts.
 
 Nothing about that is optional or bolt-on. It is the reason the app exists in this shape.
 
 ## Features
 
-- **A box per bot** — `Shell`, `Read`, `Write`, `Edit` and `ListFiles` run freely inside it. On Windows the folder is labelled Low integrity and commands go through `halo-box.exe` in a job object, so the boundary is the kernel's and not a regular expression's. On Android it is the app sandbox, which is the same boundary for free.
+- **A box per bot** — `Shell`, `Read`, `Write`, `Edit` and `ListFiles` run freely inside it. On Windows every box is its own AppContainer (plus a job object and a private desktop), so the boundary is the kernel's and not a regular expression's: [each claim is a test](host/box.test.ts) that runs the real helper. On Android it is the app sandbox, shared by the phone's bots — see [SECURITY.md](SECURITY.md#known-limits).
 - **A browser per bot** — a real Chromium screen you watch live and take over with one click, with **its own cookie jar**: a bot cannot reach a site another bot signed into, and deleting a bot deletes its logins. It works from a **snapshot** — the page's controls listed with a ref each — and clicks by ref, so an action lands on the control Halo actually saw rather than a selector the model invented.
 - **One browser, one driver** — a bot that meets a login wall asks for help; you take the wheel, do the part only you can do, and hand it back. While you hold it, the bot's actions there are refused rather than queued.
 - **Your computer, behind the gate** — `ExternalShell`, `ExternalRead`, `CopyToBox` and `CopyFromBox` each stop for approval, scoped to what was actually approved: saying yes to `git status` grants commands starting `git status`, not a shell.
@@ -197,7 +197,7 @@ electron/   main process: window, IPC, the bot's browser, teach recorder, webhoo
 host/       agent runtime: store, provider, tools, policy, memory, skills, subagents,
             runner, scheduler, MCP, fence, compaction, expression, audit, personas, n8n
 src/        renderer: React
-native/     halo-box — a Rust helper that runs a box command at Low integrity in a job object
+native/     halo-box — a Rust helper that runs a box command in the bot's own AppContainer
 android/    the phone build: core/ ports host/, platform/ replaces electron/, ui/ follows src/
 docs/       the reference teardowns, and the record of every pass over this code
 ```
@@ -210,7 +210,7 @@ docs/       the reference teardowns, and the record of every pass over this code
 | Command | What it checks |
 |---|---|
 | `npm run typecheck` | `tsc` across the desktop app and the shared runtime |
-| `npm test` | 53 tests on node's own runner. No framework, no fixtures |
+| `npm test` | 66 tests on node's own runner, 12 of them against the real box. No framework, no fixtures |
 | `npm run verify` | 19 checks driving the **real** runtime end to end |
 | `cd android && ./gradlew :app:testDebugUnitTest` | 43 tests on the JVM |
 
