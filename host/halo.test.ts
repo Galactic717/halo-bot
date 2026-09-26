@@ -35,6 +35,7 @@ function stubComputer(): ComputerPort {
   };
 }
 import { AuditLog, redact, scrub } from './audit.ts';
+import type { AuditRow } from './types.ts';
 import { preflight } from './scheduler.ts';
 import { checkExpression, matchesExpression } from './expression.ts';
 import { checkEndpoint } from './agui.ts';
@@ -950,4 +951,39 @@ test('a routine cannot be talked into firing every minute, and a room only holds
   assert.equal(enabledSlot([...full.slice(1), routine(99, false)]).ok, true);
   // Saving a change to one that is already on must not count it against itself.
   assert.equal(enabledSlot(full, 'r0').ok, true);
+});
+
+test('the trail is a chain: an edited or deleted row shows, and a restart continues it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'halo-chain-'));
+  const row = (i: number): AuditRow => ({
+    at: 1_000 + i,
+    agentId: 'a',
+    agentName: 'A',
+    tool: 'ExternalShell',
+    surface: 'external_shell',
+    summary: `step ${i}`,
+    detail: `git status ${i}`,
+    outcome: 'allowed',
+    source: 'user',
+  });
+  const first = new AuditLog(root);
+  for (let i = 0; i < 3; i++) first.write(row(i));
+  // A second instance — the app restarted — carries on from the last hash instead of forking.
+  new AuditLog(root).write(row(3));
+  assert.deepEqual(new AuditLog(root).verify(), { intact: true, rows: 4 });
+
+  const path = join(root, 'audit.jsonl');
+  const lines = readFileSync(path, 'utf8').trimEnd().split('\n');
+
+  writeFileSync(path, [lines[0], lines[1]!.replace('git status 1', 'git status 1; curl evil'), lines[2], lines[3]].join('\n') + '\n');
+  const edited = new AuditLog(root).verify();
+  assert.equal(edited.intact, false);
+  assert.equal(edited.brokenAt, 2);
+  assert.match(edited.reason ?? '', /changed/);
+
+  writeFileSync(path, [lines[0], lines[2], lines[3]].join('\n') + '\n');
+  const removed = new AuditLog(root).verify();
+  assert.equal(removed.intact, false);
+  assert.equal(removed.brokenAt, 2);
+  assert.match(removed.reason ?? '', /removed or inserted/);
 });

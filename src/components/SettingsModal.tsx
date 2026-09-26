@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { REPLY_LANGUAGES } from '../../host/personas';
-import type { AuditRow, AutoReviewRule, Settings } from '../../host/types';
+import type { AuditRow, AuditVerdict, AutoReviewRule, Settings } from '../../host/types';
 import { CloseIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons';
 
 interface SettingsModalProps {
@@ -448,6 +448,7 @@ function Model({ settings, onSave }: { settings: Settings; onSave: SettingsModal
 function Trail() {
   const [rows, setRows] = useState<AuditRow[]>([]);
   const [totals, setTotals] = useState({ allowed: 0, refused: 0, failed: 0 });
+  const [chain, setChain] = useState<AuditVerdict | null>(null);
   const [outcome, setOutcome] = useState<'' | AuditRow['outcome']>('');
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState<string | null>(null);
@@ -457,6 +458,7 @@ function Trail() {
       .audit({ limit: 300, ...(outcome ? { outcome } : {}), ...(query.trim() ? { query: query.trim() } : {}) })
       .then(setRows);
     void window.halo.auditSummary(7).then(setTotals);
+    void window.halo.auditVerify().then(setChain);
   };
 
   useEffect(load, [outcome, query]);
@@ -468,6 +470,13 @@ function Trail() {
         Every action that went through the approval gate, decided before it ran. Last seven days:{' '}
         <b>{totals.allowed}</b> allowed, <b>{totals.refused}</b> refused, <b>{totals.failed}</b> failed.
       </div>
+      {chain && (
+        <div className="setting-row__desc" style={{ marginBottom: 12 }} role={chain.intact ? undefined : 'alert'}>
+          {chain.intact
+            ? `Chain intact: every one of ${chain.rows} rows follows the one before it, unchanged.`
+            : `Chain broken at row ${chain.brokenAt} of ${chain.rows}: ${chain.reason}. Rows after it cannot be trusted.`}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <input className="input" style={{ flex: 1 }} placeholder="Search the trail" value={query} onChange={(e) => setQuery(e.target.value)} />

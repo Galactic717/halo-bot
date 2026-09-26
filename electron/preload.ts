@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { Agent, ApprovalDecision, AuditRow, Channel, ControlState, HaloEvent, Message, Routine, Settings, Snapshot } from '../host/types';
+import type { Agent, ApprovalDecision, AuditRow, AuditVerdict, Channel, ControlState, HaloEvent, Message, Routine, Settings, Snapshot } from '../host/types';
 import type { McpServerSpec, McpServerStatus } from '../host/mcp';
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -110,6 +110,7 @@ const api = {
     ipcRenderer.invoke('halo:audit', options),
   auditSummary: (days: number): Promise<{ allowed: number; refused: number; failed: number }> =>
     ipcRenderer.invoke('halo:audit.summary', days),
+  auditVerify: (): Promise<AuditVerdict> => ipcRenderer.invoke('halo:audit.verify'),
 
   control: (agentId: string): Promise<ControlState> => ipcRenderer.invoke('halo:control', agentId),
   takeControl: (agentId: string): Promise<void> => ipcRenderer.invoke('halo:control.take', agentId),
