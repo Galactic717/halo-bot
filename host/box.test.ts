@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { boxHelper, confineBox, verifyConfinement } from './box.ts';
+import { boxHelper, confineBox, confinementProblem, verifyConfinement } from './box.ts';
 import { runShell } from './tools.ts';
 
 /**
@@ -34,10 +34,15 @@ test('the box helper is built', { skip }, () => {
   assert.ok(helper, 'CI must build native/halo-box before the tests run');
 });
 
-test('a box command cannot write outside its box', { skip }, () => {
+test('a box command cannot write outside its box', { skip }, async () => {
   const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
-  const verdict = verifyConfinement(box);
+  const verdict = await verifyConfinement(box);
   assert.equal(verdict.confined, true, verdict.detail);
+});
+
+test('a box without its helper is reported, so its commands are refused rather than run unconfined', { skip: process.platform !== 'win32' }, () => {
+  const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
+  assert.match(confinementProblem(box, undefined, null) ?? '', /helper .* missing/);
 });
 
 test('a box command can still write inside its own box', { skip }, () => {

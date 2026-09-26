@@ -36,6 +36,7 @@ export function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [draft, setDraft] = useState<string | undefined>(undefined);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const [confinementError, setConfinementError] = useState<string | null>(null);
   const [previews, setPreviews] = useState<Record<string, { text: string; at: number; fromAgentId?: string }>>({});
   const [detailsTab, setDetailsTab] = useState<'details' | 'settings' | null>('details');
   const [creating, setCreating] = useState(false);
@@ -62,6 +63,7 @@ export function App() {
       setRoutines(snap.routines);
       setApprovals(snap.approvals);
       setActiveId(snap.activeAgentId);
+      if (snap.confinement && !snap.confinement.confined) setConfinementError(snap.confinement.detail);
       setPreviews(await window.halo.previews());
       setTeaching(await window.halo.teachStatus());
       document.documentElement.dataset.theme = resolveTheme(snap.settings.theme);
@@ -130,6 +132,9 @@ export function App() {
           break;
         case 'channels':
           setChannels(event.channels);
+          break;
+        case 'confinement':
+          setConfinementError(event.confined ? null : event.detail);
           break;
         case 'provider':
           setProviderError(
@@ -274,16 +279,26 @@ export function App() {
   return (
     <div className="app" style={{ gridTemplateColumns: `var(--sidebar-width) minmax(424px, 1fr) ${detailsTab ? 'auto' : '0'}` }}>
       <div className="titlebar" />
-      {providerError && (
-        <div className="provider-banner" role="status">
-          <WarningIcon size={14} />
-          <span>{providerError}</span>
-          <button className="btn" onClick={() => void window.halo.checkProvider()}>
-            Retry
-          </button>
-          <button className="btn" data-variant="primary" onClick={() => setSettingsOpen(true)}>
-            Open settings
-          </button>
+      {(providerError || confinementError) && (
+        <div className="banners">
+          {confinementError && (
+            <div className="provider-banner" role="alert">
+              <WarningIcon size={14} />
+              <span>Bot shells are switched off: {confinementError}. Reinstall Halo to restore the box.</span>
+            </div>
+          )}
+          {providerError && (
+            <div className="provider-banner" role="status">
+              <WarningIcon size={14} />
+              <span>{providerError}</span>
+              <button className="btn" onClick={() => void window.halo.checkProvider()}>
+                Retry
+              </button>
+              <button className="btn" data-variant="primary" onClick={() => setSettingsOpen(true)}>
+                Open settings
+              </button>
+            </div>
+          )}
         </div>
       )}
       <Sidebar

@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -52,11 +52,6 @@ export function boxHelper(resourcesPath?: string): string | null {
   return resolved;
 }
 
-/** Only meaningful on Windows; everywhere else the helper does not exist and the caller falls back. */
-export function confinementAvailable(resourcesPath?: string): boolean {
-  return process.platform === 'win32' && boxHelper(resourcesPath) !== null;
-}
-
 const labelled = new Set<string>();
 
 /**
@@ -67,8 +62,8 @@ const labelled = new Set<string>();
  * "Access is denied" on a freshly created folder without it. Granting ourselves full control first
  * works because an owner always holds WRITE_DAC, so we can add the access we are missing.
  *
- * Returns false when the label could not be applied, which is the caller's signal to keep the box
- * unconfined rather than hand the bot a shell that cannot write to its own workspace.
+ * Returns false when the label could not be applied; the box's commands are then refused, because a
+ * confined process could not write to its own workspace and an unconfined one is not a box.
  */
 export function confineBox(dir: string): boolean {
   if (process.platform !== 'win32') return false;
@@ -85,29 +80,47 @@ export function confineBox(dir: string): boolean {
   }
 }
 
-/** True when this box is labelled and the helper is present, so a command in it can be confined. */
-export function canConfine(dir: string, resourcesPath?: string): boolean {
-  return confinementAvailable(resourcesPath) && confineBox(dir);
+/**
+ * Why a command in this box cannot be confined, or null when it can.
+ *
+ * The caller refuses to run the command when this returns a reason. Falling back to plain PowerShell
+ * — what this used to do — handed the bot the user's full rights exactly when the boundary was
+ * missing, and said so nowhere.
+ */
+export function confinementProblem(
+  dir: string,
+  resourcesPath?: string,
+  helper: string | null = boxHelper(resourcesPath),
+): string | null {
+  if (process.platform !== 'win32') return 'the box is only enforced on Windows';
+  if (!helper) return 'the confinement helper (halo-box.exe) is missing from this install';
+  if (!confineBox(dir)) return "the box folder could not be labelled Low integrity";
+  return null;
+}
+
+export interface Confinement {
+  confined: boolean;
+  detail: string;
 }
 
 /**
- * A one-off probe that the confinement is really in force, for the About screen and for a test.
+ * A probe that the confinement is really in force, run at startup for the banner and About screen.
  *
  * Asserting the mechanism rather than trusting it: the helper could be missing, the label could have
  * failed, or a future Windows could change what Low integrity means. This asks the actual question —
- * can a command started this way write outside its box — and answers from what happened.
+ * can a command started this way write outside its box — and answers from what happened. Async, so
+ * the PowerShell start-up it waits on does not stall the main process.
  */
-export function verifyConfinement(dir: string, resourcesPath?: string): { confined: boolean; detail: string } {
-  const helper = boxHelper(resourcesPath);
-  if (!helper) return { confined: false, detail: 'the confinement helper is not built' };
-  if (!confineBox(dir)) return { confined: false, detail: 'the box could not be labelled low integrity' };
+export async function verifyConfinement(dir: string, resourcesPath?: string): Promise<Confinement> {
+  const problem = confinementProblem(dir, resourcesPath);
+  if (problem) return { confined: false, detail: problem };
   const outside = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `halo-confinement-${Date.now()}.txt`);
-  const result = spawnSync(
-    helper,
-    ['--cwd', dir, '--timeout-ms', '15000', '--', `try { Set-Content -Path '${outside}' -Value x -ErrorAction Stop; 'ESCAPED' } catch { 'BLOCKED' }`],
-    { encoding: 'utf8', windowsHide: true },
-  );
-  const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const probe = `try { Set-Content -Path '${outside}' -Value x -ErrorAction Stop; 'ESCAPED' } catch { 'BLOCKED' }`;
+  const out = await new Promise<string>((resolve) => {
+    execFile(boxHelper(resourcesPath)!, ['--cwd', dir, '--timeout-ms', '15000', '--', probe], { windowsHide: true }, (_err, stdout, stderr) =>
+      resolve(`${stdout ?? ''}${stderr ?? ''}`),
+    );
+  });
   if (out.includes('BLOCKED')) return { confined: true, detail: 'a write outside the box was refused by the kernel' };
   if (out.includes('ESCAPED')) return { confined: false, detail: 'a write outside the box succeeded' };
   return { confined: false, detail: `the probe did not run: ${out.trim().slice(0, 160) || 'no output'}` };
