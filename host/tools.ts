@@ -179,17 +179,15 @@ export function runShell(
       return;
     }
     const helper = confined && canConfine(cwd, process.resourcesPath) ? boxHelper(process.resourcesPath) : null;
+    // stdin is NUL: nobody can type into a bot's shell, so a command that reads input (Read-Host, a
+    // REPL, an installer's prompt) gets end-of-file at once instead of hanging until the timeout.
+    const base = { cwd, windowsHide: true, env: shellEnvironment() };
     const child = helper
-      ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], {
-          cwd,
-          windowsHide: true,
-          env: shellEnvironment(),
-        })
-      : spawn(
-          'powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
-          { cwd, windowsHide: true, env: shellEnvironment() },
-        );
+      ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], { ...base, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+          ...base,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
     let out = '';
     const push = (b: Buffer) => {
       out += b.toString('utf8');
