@@ -196,6 +196,14 @@ extern "system" {
         new_token: *mut Handle,
     ) -> Bool;
     fn SetTokenInformation(token: Handle, class: Dword, info: *mut core::ffi::c_void, len: Dword) -> Bool;
+    fn GetTokenInformation(token: Handle, class: Dword, info: *mut core::ffi::c_void, len: Dword, returned: *mut Dword) -> Bool;
+    fn ConvertSidToStringSidW(sid: *mut core::ffi::c_void, out: *mut *mut u16) -> Bool;
+    fn GetSecurityDescriptorDacl(
+        descriptor: *mut core::ffi::c_void,
+        present: *mut Bool,
+        dacl: *mut *mut core::ffi::c_void,
+        defaulted: *mut Bool,
+    ) -> Bool;
     fn ConvertStringSidToSidW(sid: *const u16, out: *mut *mut core::ffi::c_void) -> Bool;
     fn CreateProcessAsUserW(
         token: Handle,
@@ -366,6 +374,52 @@ fn fail(what: &str) -> ! {
     exit(-1);
 }
 
+/// Makes the objects the child creates for itself belong to the user, not to Administrators.
+///
+/// An elevated token's default DACL grants BUILTIN\Administrators rather than the user. Once that
+/// group is deny-only, the child cannot open the process, thread and section objects it creates
+/// during start-up, and dies in DLL init (0xC0000142) — every box command failed whenever Halo ran
+/// elevated, which is how CI runners run. Chromium's sandbox sets the default DACL for the same
+/// reason. Not elevated, this changes nothing: the default DACL already named the user.
+unsafe fn own_default_dacl(token: Handle) {
+    const TOKEN_USER: Dword = 1;
+    const TOKEN_DEFAULT_DACL: Dword = 6;
+    let mut buffer = [0u8; 256];
+    let mut returned: Dword = 0;
+    if GetTokenInformation(token, TOKEN_USER, buffer.as_mut_ptr() as *mut _, buffer.len() as Dword, &mut returned) == FALSE {
+        fail("GetTokenInformation(user)");
+    }
+    // TOKEN_USER starts with the SID pointer of its SID_AND_ATTRIBUTES.
+    let user_sid = *(buffer.as_ptr() as *const *mut core::ffi::c_void);
+    let mut text: *mut u16 = core::ptr::null_mut();
+    if ConvertSidToStringSidW(user_sid, &mut text) == FALSE {
+        fail("ConvertSidToStringSid");
+    }
+    let mut len = 0;
+    while *text.add(len) != 0 {
+        len += 1;
+    }
+    let user = String::from_utf16_lossy(core::slice::from_raw_parts(text, len));
+
+    let sd = descriptor(&format!("D:(A;;GA;;;{user})(A;;GA;;;SY)"));
+    let mut present: Bool = FALSE;
+    let mut defaulted: Bool = FALSE;
+    let mut dacl: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) == FALSE || present == FALSE {
+        fail("GetSecurityDescriptorDacl");
+    }
+    let mut value = dacl;
+    if SetTokenInformation(
+        token,
+        TOKEN_DEFAULT_DACL,
+        &mut value as *mut _ as *mut core::ffi::c_void,
+        core::mem::size_of::<*mut core::ffi::c_void>() as Dword,
+    ) == FALSE
+    {
+        fail("SetTokenInformation(default DACL)");
+    }
+}
+
 /// The token the command runs under: ours, minus privileges, minus admin, at Low integrity.
 unsafe fn confined_token() -> Handle {
     let mut own: Handle = NULL;
@@ -417,6 +471,7 @@ unsafe fn confined_token() -> Handle {
         fail("DuplicateTokenEx");
     }
     CloseHandle(restricted);
+    own_default_dacl(primary);
 
     let mut low: *mut core::ffi::c_void = core::ptr::null_mut();
     let low_sid = wide("S-1-16-4096"); // SECURITY_MANDATORY_LOW_RID
