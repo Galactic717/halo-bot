@@ -234,6 +234,7 @@ extern "system" {
     fn TerminateProcess(process: Handle, code: Dword) -> Bool;
     fn GetLastError() -> Dword;
     fn LocalFree(memory: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    fn GetLongPathNameW(short: *const u16, long: *mut u16, length: Dword) -> Dword;
     fn InitializeProcThreadAttributeList(list: *mut core::ffi::c_void, count: Dword, flags: Dword, size: *mut usize) -> Bool;
     fn UpdateProcThreadAttribute(
         list: *mut core::ffi::c_void,
@@ -650,6 +651,22 @@ struct Args {
     command: String,
 }
 
+/// A path with every 8.3 short component (`RUNNER~1`) expanded.
+///
+/// The container cannot resolve a short name — that needs a listing of the parent folder, which it
+/// is not given — so a box reached through one is "access denied" to its own shell. Expanded here,
+/// by the helper, which can. The container name is derived from the result, so both spellings of a
+/// path map to the same box.
+fn long_path(path: &str) -> String {
+    let short = wide(path);
+    let mut buffer = vec![0u16; 1024];
+    let length = unsafe { GetLongPathNameW(short.as_ptr(), buffer.as_mut_ptr(), buffer.len() as Dword) } as usize;
+    if length == 0 || length >= buffer.len() {
+        return path.to_string();
+    }
+    String::from_utf16_lossy(&buffer[..length])
+}
+
 fn parse() -> Args {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut args = Args {
@@ -693,7 +710,8 @@ fn parse() -> Args {
         }
         i += 1;
     }
-    if args.forget.is_some() {
+    if let Some(dir) = args.forget.take() {
+        args.forget = Some(long_path(&dir));
         return args;
     }
     if args.box_dir.is_empty() {
@@ -702,6 +720,8 @@ fn parse() -> Args {
     if args.cwd.is_empty() {
         args.cwd = args.box_dir.clone();
     }
+    args.box_dir = long_path(&args.box_dir);
+    args.cwd = long_path(&args.cwd);
     if args.box_dir.is_empty() || args.command.trim().is_empty() {
         eprintln!("halo-box: usage: halo-box --box <dir> [--cwd <dir>] [--network] [--timeout-ms N] -- <command>");
         exit(-1);
