@@ -55,7 +55,7 @@ function inBoxScript(box: string, script: string): string {
 test('a box command gets a scratch folder it can write, inside its box', { skip }, () => {
   const box = mkdtempSync(join(tmpdir(), 'halo-box-'));
   assert.ok(confineBox(box));
-  const out = inBoxScript(box, '$f = New-TemporaryFile; Split-Path $f -Parent');
+  const out = inBoxScript(box, 'Split-Path ([IO.Path]::GetTempFileName()) -Parent');
   assert.equal(out.toLowerCase(), join(box, '.tmp').toLowerCase());
 });
 
