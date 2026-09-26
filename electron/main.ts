@@ -848,6 +848,7 @@ function registerIpc() {
     runner.audit.read(options ?? {}),
   );
   ipcMain.handle('halo:audit.summary', (_e, days: number) => runner.audit.summary(days ?? 7));
+  ipcMain.handle('halo:audit.verify', () => runner.audit.verify());
 
   ipcMain.handle('halo:control', (_e, agentId: string) => computer.controlOf(agentId));
   ipcMain.handle('halo:control.take', (_e, agentId: string) => {
