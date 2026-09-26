@@ -589,12 +589,6 @@ fn main() {
 
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
         let shell = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-
-        // Only the modules Windows ships. With the default path, PowerShell analyses every module
-        // under Program Files to find a command, and at Low integrity it cannot save that analysis
-        // — so on a machine with many modules installed every box command paid ~30 s before it ran.
-        // A module a bot needs can still be imported by path.
-        std::env::set_var("PSModulePath", format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\Modules"));
         // -NoProfile matters twice: speed, and a profile script is a place somebody could put
         // something that runs before every command the boundary was built to contain.
         let mut command_line = wide(&format!(
