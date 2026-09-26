@@ -584,6 +584,11 @@ fn main() {
             if std::fs::create_dir_all(&scratch).is_ok() {
                 std::env::set_var("TEMP", &scratch);
                 std::env::set_var("TMP", &scratch);
+                // PowerShell resolves commands from a module-analysis cache under %LOCALAPPDATA%,
+                // which a Low process can read but not write. Where that cache is missing or stale
+                // it rebuilt the analysis on every command and threw it away: ~20-30 s before each
+                // box command ran. A cache inside the box is built once and kept.
+                std::env::set_var("PSModuleAnalysisCachePath", format!("{scratch}\\ModuleAnalysisCache"));
             }
         }
 
