@@ -630,6 +630,7 @@ function Usage() {
 
 function About() {
   const [confinement, setConfinement] = useState<{ confined: boolean; detail: string } | null>(null);
+  const [copied, setCopied] = useState(false);
   useEffect(() => {
     void window.halo.snapshot().then((snap) => setConfinement(snap.confinement));
   }, []);
@@ -648,6 +649,27 @@ function About() {
             ? `Enforced: ${confinement.detail}.`
             : `Not enforced, so bot shells are switched off: ${confinement.detail}.`}
       </p>
+      <h3>When something goes wrong</h3>
+      <p className="setting-row__desc">
+        Halo keeps a log of what it did and what failed. Diagnostics are safe to paste into an issue: no key, no conversation,
+        and anything shaped like a secret is masked.
+      </p>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn" onClick={() => void window.halo.openLogs()}>
+          Open logs folder
+        </button>
+        <button
+          className="btn"
+          onClick={() =>
+            void window.halo.diagnostics().then((text) => {
+              void navigator.clipboard.writeText(text);
+              setCopied(true);
+            })
+          }
+        >
+          {copied ? 'Copied' : 'Copy diagnostics'}
+        </button>
+      </div>
     </>
   );
 }
