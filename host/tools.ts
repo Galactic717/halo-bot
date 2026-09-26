@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { boxHelper, canConfine } from './box.ts';
+import { boxHelper, confinementProblem } from './box.ts';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, statfsSync, copyFileSync, realpathSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, relative, resolve, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -155,9 +155,8 @@ export function shellEnvironment(source: NodeJS.ProcessEnv = process.env): Recor
  * the approval gate — deliberately does not: the whole point of that surface is to act with the
  * user's own rights, on purpose, once they have said yes.
  *
- * Falls back to plain PowerShell when the helper is missing or the box could not be labelled, because
- * a bot that cannot run anything is worse than one running as it did last week. `verifyConfinement`
- * is what tells the user which of the two they have.
+ * A box command that cannot be confined is not run at all. It used to fall back to plain PowerShell,
+ * which handed the bot the user's full rights in exactly the case where the boundary was missing.
  */
 export function runShell(
   command: string,
@@ -175,17 +174,28 @@ export function runShell(
      * on the user's machine already exists or the command should say so, and creating one that is a
      * drive root throws EPERM, which surfaced as "the tool failed" with no hint of why.
      */
-    if (confined) mkdirSync(cwd, { recursive: true });
-    else if (!existsSync(cwd)) {
+    if (confined) {
+      mkdirSync(cwd, { recursive: true });
+      const problem = confinementProblem(cwd, process.resourcesPath);
+      if (problem) {
+        resolveP({
+          code: -1,
+          out: `Halo did not run this: ${problem}, and an unconfined box command would run with the user's full rights. Tell the user; reinstalling Halo restores the helper.`,
+        });
+        return;
+      }
+    } else if (!existsSync(cwd)) {
       resolveP({ code: -1, out: `No such directory on this machine: ${cwd}` });
       return;
     }
-    const helper = confined && canConfine(cwd, process.resourcesPath) ? boxHelper(process.resourcesPath) : null;
     // stdin is NUL: nobody can type into a bot's shell, so a command that reads input (Read-Host, a
     // REPL, an installer's prompt) gets end-of-file at once instead of hanging until the timeout.
     const base = { cwd, windowsHide: true, env: shellEnvironment() };
-    const child = helper
-      ? spawn(helper, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], { ...base, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = confined
+      ? spawn(boxHelper(process.resourcesPath)!, ['--cwd', cwd, '--timeout-ms', String(timeoutMs), '--', command], {
+          ...base,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
       : spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
           ...base,
           stdio: ['ignore', 'pipe', 'pipe'],
