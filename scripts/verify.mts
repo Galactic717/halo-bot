@@ -184,8 +184,12 @@ async function main() {
   console.log('A turn, end to end');
   runner.submitUserMessage(agent.id, 'do the thing');
   await settle(runner, agent.id);
-  if (process.env.HALO_VERIFY_DEBUG) {
+  // A turn still running after the wait is the one failure the checks below cannot explain, so the
+  // evidence is printed without being asked for: on CI there is no second chance to look.
+  if (process.env.HALO_VERIFY_DEBUG || runner.isBusy(agent.id)) {
+    console.log(`  [debug] still busy: ${runner.isBusy(agent.id)}`);
     console.log(`  [debug] model requests seen: ${model.seen()}`);
+    console.log(`  [debug] tool results: ${JSON.stringify(llmLines(root, agent.id).filter((l) => l.role === 'tool').map((l) => [l.name, String(l.content).slice(0, 200)]))}`);
     console.log(`  [debug] transcript: ${JSON.stringify(store.transcript(agent.id).map((m) => [m.role, m.text.slice(0, 60)]))}`);
     console.log(`  [debug] events: ${JSON.stringify(events.map((e) => e.type))}`);
   }
