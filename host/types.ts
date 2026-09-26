@@ -333,6 +333,8 @@ export interface Snapshot {
   routines: Routine[];
   approvals: ApprovalRequest[];
   activeAgentId: string | null;
+  /** Whether a bot's shell is really confined to its box; null until the startup probe answers. */
+  confinement: { confined: boolean; detail: string } | null;
 }
 
 export type HaloEvent =
@@ -347,6 +349,7 @@ export type HaloEvent =
   /** Tray or a notification asking the window to open a particular conversation. */
   | { type: 'focus'; agentId: string }
   | { type: 'teaching'; agentId: string; recording: boolean; seconds: number; steps: number }
+  | { type: 'confinement'; confined: boolean; detail: string }
   | { type: 'provider'; ok: boolean; baseUrl: string; model: string; error?: string; kind?: 'unreachable' | 'model' }
   | { type: 'routines'; routines: Routine[] }
   | { type: 'settings'; settings: Settings }

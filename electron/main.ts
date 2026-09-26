@@ -14,6 +14,7 @@ import { MCP_CATALOG } from '../host/catalog';
 import { parseMcpConfig } from '../host/plugins';
 import { listModels, listModelsDetailed, rankModels } from '../host/provider';
 import { parseTrigger } from '../host/tools';
+import { verifyConfinement, type Confinement } from '../host/box';
 import type { Agent, ApprovalDecision, Channel, HaloEvent, Routine, Settings } from '../host/types';
 
 const DEV = process.env.HALO_DEV === '1';
@@ -35,6 +36,8 @@ let computer: Computer;
 let scheduler: Scheduler;
 let mcp: McpManager;
 let quitting = false;
+/** What the startup probe found about the box; null until it has answered. */
+let confinement: Confinement | null = null;
 
 function emit(event: HaloEvent) {
   if (win && !win.isDestroyed()) win.webContents.send('halo:event', event);
@@ -302,6 +305,7 @@ function snapshot() {
     routines: store.listRoutines(),
     approvals: runner.pendingApprovals(),
     activeAgentId: store.listAgents()[0]?.id ?? null,
+    confinement,
   };
 }
 
@@ -882,6 +886,12 @@ if (!app.requestSingleInstanceLock()) {
       win?.webContents.send('halo:event', { type: 'computer', agentId, url: '', title: '', visible: true });
     };
     runner = new Runner({ store, computer, emit, notify, mcp });
+    // Asked of the kernel, not assumed: a missing helper or a failed label turns every box command
+    // into a refusal, and the user should hear that from a banner before a bot hits it mid-task.
+    void verifyConfinement(join(app.getPath('userData'), 'confinement-probe'), process.resourcesPath).then((result) => {
+      confinement = result;
+      emit({ type: 'confinement', ...result });
+    });
     scheduler = new Scheduler(store, runner, emit);
     scheduler.start();
     void startWebhookServer(fireWebhook).then((server) => {

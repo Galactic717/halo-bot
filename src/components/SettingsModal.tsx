@@ -620,12 +620,24 @@ function Usage() {
 }
 
 function About() {
+  const [confinement, setConfinement] = useState<{ confined: boolean; detail: string } | null>(null);
+  useEffect(() => {
+    void window.halo.snapshot().then((snap) => setConfinement(snap.confinement));
+  }, []);
   return (
     <>
       <h2>About</h2>
       <p className="setting-row__desc">
         Halo Bot — AI teammates that run on your own Windows machine. Each bot has its own box, browser, memory and
         routines, and asks before it touches anything outside its box.
+      </p>
+      <h3>The box</h3>
+      <p className="setting-row__desc">
+        {confinement === null
+          ? 'Checking whether the box is enforced…'
+          : confinement.confined
+            ? `Enforced: ${confinement.detail}.`
+            : `Not enforced, so bot shells are switched off: ${confinement.detail}.`}
       </p>
     </>
   );
