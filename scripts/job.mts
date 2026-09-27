@@ -16,7 +16,7 @@
  * for "open the page and read it", which is what these jobs ask; the real window is electron/computer.ts.
  */
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -102,6 +102,17 @@ function textBrowser(): ComputerPort {
 
 // --------------------------------------------------------------------- run one
 
+function listBox(box: string, prefix = ''): string[] {
+  if (!existsSync(join(box, prefix))) return [];
+  return readdirSync(join(box, prefix), { withFileTypes: true }).flatMap((entry) => {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.name.startsWith('.')) return [];
+    if (entry.isDirectory()) return listBox(box, rel);
+    const first = readFileSync(join(box, rel), 'utf8').split(/\r?\n/).find((l) => l.trim()) ?? '';
+    return [`${rel}: ${first.slice(0, 70)}`];
+  });
+}
+
 interface Outcome {
   id: string;
   pass: boolean;
@@ -112,7 +123,11 @@ interface Outcome {
   costUsd: number;
   tools: string[];
   refusedApprovals: number;
+  /** What was asked for and refused, so a bot reaching past its box is visible in the report. */
+  refused: string[];
   replies: string;
+  /** Files in the box afterwards, with their first line, for reading a failure. */
+  box: string[];
   note?: string;
 }
 
@@ -127,14 +142,14 @@ async function runCase(c: (typeof CASES)[number], provider: Settings['provider']
     writeFileSync(join(box, path), body);
   }
 
-  let refused = 0;
+  const refused: string[] = [];
   let note: string | undefined;
   const runner = new Runner({
     store,
     computer: textBrowser(),
     emit: (event) => {
       if (event.type === 'approval') {
-        refused += 1;
+        refused.push(`${event.approval.surface}: ${event.approval.summary}`.slice(0, 160));
         runner.resolveApproval(event.approval.id, 'never');
       }
       if (event.type === 'error') note = event.message;
@@ -191,8 +206,10 @@ async function runCase(c: (typeof CASES)[number], provider: Settings['provider']
     completionTokens: usage.reduce((n, u) => n + u.completionTokens, 0),
     costUsd: usage.reduce((n, u) => n + (u.costUsd ?? 0), 0),
     tools: calls.map((x) => x.name),
-    refusedApprovals: refused,
+    refusedApprovals: refused.length,
+    refused,
     replies: replies.slice(0, 400),
+    box: listBox(box),
     ...(note ? { note } : {}),
   };
   runner.stop(agent.id);
@@ -238,7 +255,11 @@ async function main() {
           `${(o.promptTokens / 1000).toFixed(1)}k in  ${o.costUsd ? `$${o.costUsd.toFixed(4)}  ` : ''}` +
           `tools: ${o.tools.join(' ') || '(none)'}${o.refusedApprovals ? `  refused approvals: ${o.refusedApprovals}` : ''}${o.note ? `\n        ${o.note}` : ''}`,
       );
-      if (!o.pass && process.env.HALO_JOB_DEBUG) console.log(`        replies: ${JSON.stringify(o.replies)}`);
+      for (const r of o.refused) console.log(`        refused ${r}`);
+      if (!o.pass) {
+        console.log(`        replies: ${JSON.stringify(o.replies.slice(0, 300))}`);
+        console.log(`        box: ${o.box.join(' | ')}`);
+      }
     }
   }
   fixture.server.close();

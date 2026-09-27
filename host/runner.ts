@@ -1073,7 +1073,8 @@ export class Runner implements RunnerPort {
         });
       }
 
-      void this.rememberExchange(agentId, userText);
+      // Best effort, after the turn: a model that is down for this one call must not take the app with it.
+      void this.rememberExchange(agentId, userText).catch(() => {});
       if (abort.signal.aborted) return { ok: false, note: 'stopped' };
       return { ok: true, ...(lastDelivered ? { note: lastDelivered } : {}) };
     } catch (error) {
