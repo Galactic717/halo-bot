@@ -142,7 +142,9 @@ does not parse refuses rather than opens.
 **Smart review** asks the model about anything the local rules would wave through. The command
 reaches that reviewer with its comments stripped and inside a fence, and your rules reach it on the
 trusted channel, so a comment inside the command cannot argue its own way past the check. A review
-that cannot run fails closed.
+that cannot run fails closed. Commands inside a bot's own box are not reviewed while that box has no
+network: they run in its AppContainer or not at all, and a small helper model second-guessing
+`cat total.txt` only stalled unattended work.
 
 **Dry run** decides and records without blocking, so you can watch a new rule work on real work
 before it starts refusing things. The floor still refuses in both modes.
