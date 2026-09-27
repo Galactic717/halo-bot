@@ -800,6 +800,7 @@ export class Runner implements RunnerPort {
      * the user when even that did not land.
      */
     let workedThisTurn = false;
+    let talkOnlySteps = 0;
     let nudgedForDelivery = false;
     let widgetSent = false;
     /** One compaction per turn: a second overflow means the tail alone does not fit, and looping would not help. */
@@ -1027,6 +1028,15 @@ export class Runner implements RunnerPort {
             );
           }
         }
+
+        /*
+         * A small model that has delivered does not always know how to stop: it thanks the user,
+         * then summarises the summary, eight messages in a row (seen on Gemma 4 E4B). Two steps
+         * that did nothing but talk, after the work, is the turn being over.
+         */
+        const talkOnly = result.toolCalls.every((c) => c.name === 'SendMessage' || c.name === 'ReactToMessage');
+        talkOnlySteps = talkOnly && deliveredSomething ? talkOnlySteps + 1 : 0;
+        if (talkOnlySteps >= 2) break;
       }
 
       /*

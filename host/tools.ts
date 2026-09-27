@@ -287,7 +287,7 @@ export const TOOLS: Tool[] = [
         .filter((image) => existsSync(image.path));
       if (!text && images.length === 0) return { output: 'Nothing sent: text was empty.', isError: true };
       ctx.sendMessage(text, images);
-      return { output: images.length ? `Delivered with ${images.length} image(s).` : 'Delivered to the user.' };
+      return { output: `${images.length ? `Delivered with ${images.length} image(s).` : 'Delivered to the user.'} If the work is done, stop: end your turn without calling another tool.` };
     },
   },
 
