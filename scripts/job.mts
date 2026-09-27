@@ -102,13 +102,19 @@ function textBrowser(): ComputerPort {
 
 // --------------------------------------------------------------------- run one
 
+/** A file's text the way an editor shows it: a BOM is not content, and UTF-16 is still text. */
+function textOf(bytes: Buffer): string {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return bytes.subarray(2).toString('utf16le');
+  return bytes.toString('utf8').replace(/^\uFEFF/, '');
+}
+
 function listBox(box: string, prefix = ''): string[] {
   if (!existsSync(join(box, prefix))) return [];
   return readdirSync(join(box, prefix), { withFileTypes: true }).flatMap((entry) => {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.name.startsWith('.')) return [];
     if (entry.isDirectory()) return listBox(box, rel);
-    const first = readFileSync(join(box, rel), 'utf8').split(/\r?\n/).find((l) => l.trim()) ?? '';
+    const first = textOf(readFileSync(join(box, rel))).split(/\r?\n/).find((l) => l.trim()) ?? '';
     return [`${rel}: ${first.slice(0, 70)}`];
   });
 }
@@ -161,8 +167,14 @@ async function runCase(c: (typeof CASES)[number], provider: Settings['provider']
   const prompt = typeof c.prompt === 'function' ? c.prompt(base) : c.prompt;
   runner.submitUserMessage(agent.id, prompt);
   const deadline = started + Number(opt.timeout) * 1000;
+  // Done means the bot and everything it handed off have gone quiet: a job given to a background
+  // worker comes back as a second turn, and judging after the first would fail a bot for delegating.
+  const settled = () => !runner.isBusy(agent.id) && !runner.listTasks(agent.id).some((t) => t.status === 'running');
   await new Promise((r) => setTimeout(r, 150));
-  while (runner.isBusy(agent.id) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+  for (let quiet = 0; quiet < 3 && Date.now() < deadline; ) {
+    await new Promise((r) => setTimeout(r, 250));
+    quiet = settled() ? quiet + 1 : 0;
+  }
   if (runner.isBusy(agent.id)) {
     note = `timed out after ${opt.timeout}s`;
     runner.stop(agent.id);
@@ -191,7 +203,7 @@ async function runCase(c: (typeof CASES)[number], provider: Settings['provider']
     replies,
     boxFile: (path) => {
       const full = join(box, path);
-      return existsSync(full) ? readFileSync(full, 'utf8') : null;
+      return existsSync(full) ? textOf(readFileSync(full)) : null;
     },
     calls,
     hits: [...hits],
