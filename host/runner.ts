@@ -801,6 +801,8 @@ export class Runner implements RunnerPort {
      */
     let workedThisTurn = false;
     let talkOnlySteps = 0;
+    /** Whether anything but talking happened this turn; only then can talking be the end of it. */
+    let didWork = false;
     let nudgedForDelivery = false;
     let widgetSent = false;
     /** One compaction per turn: a second overflow means the tail alone does not fit, and looping would not help. */
@@ -1035,8 +1037,9 @@ export class Runner implements RunnerPort {
          * that did nothing but talk, after the work, is the turn being over.
          */
         const talkOnly = result.toolCalls.every((c) => c.name === 'SendMessage' || c.name === 'ReactToMessage');
+        if (!talkOnly) didWork = true;
         talkOnlySteps = talkOnly && deliveredSomething ? talkOnlySteps + 1 : 0;
-        if (talkOnlySteps >= 2) break;
+        if (talkOnlySteps >= 2 && didWork) break;
       }
 
       /*
