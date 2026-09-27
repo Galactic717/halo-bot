@@ -1134,7 +1134,7 @@ export class Runner implements RunnerPort {
      * A box command runs in the bot's own AppContainer or not at all (runShell fails closed), so the
      * kernel is its boundary. With the box offline the worst it can do is to the bot's own box, and a
      * model asked to second-guess `cat total.txt` — a 4B helper, on a small setup — mostly raised false
-     * alarms that stalled unattended work (scripts/job.mts: seven in one run). With network on, a box
+     * alarms that stalled unattended work (scripts/job.mts: eight in one run). With network on, a box
      * command could carry out what the bot read, so it is still reviewed.
      */
     const offlineBox = tool.surface === 'shell' && !this.store.getAgent(agentId)?.boxNetwork;

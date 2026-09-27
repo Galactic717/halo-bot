@@ -26,17 +26,27 @@ provider layer; **add** a compact profile for small models and a real-job proof;
 - [x] scripts/job.mts + evals/tasks.mts: page-watch, outbound-drafts, poisoned-page + 8 box chores
 - [x] live on llama.cpp Gemma 4 E4B (baseline 7/11 before the box fixes)
 - [x] live on OpenRouter gemma-4-26b-a4b-it:free — 3/3 web jobs
-- [ ] re-measure on Gemma after the box fixes (running)
-- [ ] live run in the Electron app itself: create a bot, give it the page-watch job, watch tools fire
+- [x] re-measure on Gemma after the box fixes: E4B 7/11 → 10/11 (435 s vs 1,394 s)
+- [x] live run in the Electron app itself: Watcher on Gemma 4 26B-A4B did page-watch in two turns (docs/screenshots/job-live.png)
+- [x] stronger local model: Gemma 4 26B-A4B from E:\llm — 11/11
+- [x] Halo's own fallback down the model list on 429/5xx (OpenRouter's did not fire on upstream limits)
 
 ## Found on the way (all fixed, each with a test)
 - [x] memory extraction after a bot is deleted crashed the process
 - [x] box commands lost every double quote (helper appended the command raw to powershell's command line)
 - [x] Remove-Item / Move-Item / Rename-Item denied on every file in the box (provider walks the box's parents)
 - [x] smart review by a 4B helper raised false ASKs on offline box commands and stalled unattended jobs
+- [x] PS 5.1 wrote UTF-16 / ANSI / #TYPE / decimal commas / OEM stdout in the box
+- [x] a clock in the system prompt defeated llama.cpp's prefix cache (90 s → 4 s per step)
 
 ## Truth
 - [x] Setup: llama.cpp + OpenRouter first, probe says window + tool template
 - [x] SECURITY.md: parsing calls from text, UseTool is not a boundary, Android frozen
-- [ ] README: measured table, what this build is, Android frozen, not-done list
-- [ ] docs/WORK_2026_09_27.md numbers
+- [x] README: measured table, what this build is, Android frozen, not-done list
+- [x] docs/WORK_2026_09_27.md
+
+## Next shift
+- [ ] repeat every case ×5 on E4B and 26B; publish variance
+- [ ] qwen3.8 repeated a finished job twice on OpenRouter — reproduce and find out why
+- [ ] Android: port the provider/compact/box-text work or say it is desktop-only in the app too
+- [ ] a real release (signed installer) — none exists
