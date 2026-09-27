@@ -16,6 +16,7 @@ import { listModels, listModelsDetailed, rankModels, serverInfo } from '../host/
 import { parseTrigger } from '../host/tools';
 import { verifyConfinement, type Confinement } from '../host/box';
 import type { Agent, ApprovalDecision, Channel, HaloEvent, Routine, Settings } from '../host/types';
+import { initLog, log, logDir, recentLog } from '../host/log';
 
 const DEV = process.env.HALO_DEV === '1';
 const BG = '#070707';
@@ -245,6 +246,8 @@ async function checkProvider(force = false) {
     }
   } catch (error) {
     if (force || providerHealthy !== false) {
+      // Logged on the change to unhealthy, not every minute it stays that way.
+      if (providerHealthy !== false) log('warn', 'provider.unreachable', { baseUrl: provider.baseUrl, model: provider.model, error: String(error) });
       providerHealthy = false;
       if (scheduler) scheduler.providerHealthy = false;
       emit({
@@ -853,6 +856,23 @@ function registerIpc() {
   );
   ipcMain.handle('halo:audit.summary', (_e, days: number) => runner.audit.summary(days ?? 7));
   ipcMain.handle('halo:audit.verify', () => runner.audit.verify());
+  ipcMain.handle('halo:openLogs', () => shell.openPath(logDir() ?? app.getPath('userData')));
+  /** What a bug report needs, with nothing secret in it: no key, no transcript, scrubbed log lines. */
+  ipcMain.handle('halo:diagnostics', () => {
+    const provider = store.getSettings().provider;
+    return [
+      `Halo Bot ${app.getVersion()} (Electron ${process.versions.electron}, ${process.platform} ${process.arch}, ${process.getSystemVersion()})`,
+      `Model: ${provider.model || '(none)'} at ${provider.baseUrl}`,
+      `Box: ${confinement ? `${confinement.confined ? 'enforced' : 'NOT enforced'} — ${confinement.detail}` : 'not probed yet'}`,
+      `Trail: ${(() => {
+        const chain = runner.audit.verify();
+        return chain.intact ? `chain intact, ${chain.rows} rows` : `chain broken at row ${chain.brokenAt}: ${chain.reason}`;
+      })()}`,
+      '',
+      'Recent log:',
+      ...recentLog(100),
+    ].join('\n');
+  });
 
   ipcMain.handle('halo:control', (_e, agentId: string) => computer.controlOf(agentId));
   ipcMain.handle('halo:control.take', (_e, agentId: string) => {
@@ -879,8 +899,18 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
+  // Whatever escapes every catch ends up here rather than as a silent tray icon doing nothing.
+  process.on('uncaughtException', (error) => log('error', 'crash.main', { error }));
+  process.on('unhandledRejection', (reason) => log('error', 'crash.promise', { error: reason instanceof Error ? reason : String(reason) }));
+  app.on('render-process-gone', (_e, _contents, details) => log('error', 'crash.renderer', { reason: details.reason, exitCode: details.exitCode }));
+  app.on('child-process-gone', (_e, details) =>
+    log('error', 'crash.child', { type: details.type, reason: details.reason, exitCode: details.exitCode, name: details.name ?? '' }),
+  );
+
   app.whenReady().then(() => {
     app.setAppUserModelId('com.halo.bot');
+    initLog(app.getPath('userData'));
+    log('info', 'app.start', { version: app.getVersion(), electron: process.versions.electron, platform: `${process.platform} ${process.arch}` });
     store = new Store(app.getPath('userData'), secretCodec());
     createWindow();
     mcp = new McpManager(() => store.getSettings().plugins as McpServerSpec[]);
@@ -895,6 +925,7 @@ if (!app.requestSingleInstanceLock()) {
     // into a refusal, and the user should hear that from a banner before a bot hits it mid-task.
     void verifyConfinement(join(app.getPath('userData'), 'confinement-probe'), process.resourcesPath).then((result) => {
       confinement = result;
+      log(result.confined ? 'info' : 'error', 'box.probe', { ...result });
       emit({ type: 'confinement', ...result });
     });
     scheduler = new Scheduler(store, runner, emit);

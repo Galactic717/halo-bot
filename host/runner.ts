@@ -18,6 +18,7 @@ import { ensureReference } from './reference.ts';
 import { McpManager } from './mcp.ts';
 import { SUBAGENT_TOOLS, subagentSystemPrompt } from './subagents.ts';
 import type { Store } from './store.ts';
+import { log } from './log.ts';
 import type { Agent, ApprovalDecision, ApprovalRequest, AuditRow, Channel, HaloEvent, Message, SystemEvent, ToolCallRecord, Widget } from './types.ts';
 
 const HISTORY_LIMIT = 80;
@@ -753,6 +754,7 @@ export class Runner implements RunnerPort {
     if (!agent) return { ok: false, note: 'the bot no longer exists' };
     const settings = this.store.getSettings();
     const abort = new AbortController();
+    const started = Date.now();
     const key = conversationKey(agentId, channelId);
     this.aborts.set(key, abort);
 
@@ -1080,11 +1082,13 @@ export class Runner implements RunnerPort {
 
       // Best effort, after the turn: a model that is down for this one call must not take the app with it.
       void this.rememberExchange(agentId, userText).catch(() => {});
+      log('info', 'turn.done', { agentId, ms: Date.now() - started, stopped: abort.signal.aborted, delivered: Boolean(lastDelivered) });
       if (abort.signal.aborted) return { ok: false, note: 'stopped' };
       return { ok: true, ...(lastDelivered ? { note: lastDelivered } : {}) };
     } catch (error) {
       const message = String((error as Error)?.message ?? error);
       const reason = error instanceof ProviderError ? error.reason : classifyProviderError(error);
+      log('error', 'turn.failed', { agentId, ms: Date.now() - started, reason, error: error instanceof Error ? error : message });
       // A refused connection arrives as fetch's own TypeError, not a ProviderError, and "Turn failed:
       // fetch failed" told the user nothing; any error that classifies gets the sentence that fixes it.
       const text = error instanceof ProviderError || reason !== 'unknown' ? describeFailure(reason, message) : `Turn failed: ${message}`;

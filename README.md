@@ -7,7 +7,7 @@
 [**Quick start**](#quick-start) · [**What it does, measured**](#what-it-does-measured) · [**Staying in control**](#staying-in-control) · [**Architecture**](#architecture) · [**Verification**](#verification) · [**Not done yet**](#not-done-yet)
 
 [![CI](https://github.com/Galactic717/halo-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/Galactic717/halo-bot/actions/workflows/ci.yml)
-[![desktop tests](https://img.shields.io/badge/desktop-77%20tests-2ea043)](host/halo.test.ts)
+[![desktop tests](https://img.shields.io/badge/desktop-78%20tests-2ea043)](host/halo.test.ts)
 [![end to end](https://img.shields.io/badge/end%20to%20end-29%20checks-2ea043)](scripts/verify.mts)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Alpha](https://img.shields.io/badge/status-alpha-orange.svg)
@@ -263,7 +263,7 @@ docs/       the reference teardowns, and the record of every pass over this code
 | Command | What it checks |
 |---|---|
 | `npm run typecheck` | `tsc` across the desktop app and the shared runtime |
-| `npm test` | 77 tests on node's own runner, 12 of them against the real box. No framework, no fixtures |
+| `npm test` | 78 tests on node's own runner, 12 of them against the real box. No framework, no fixtures |
 | `npm run verify` | 29 checks driving the **real** runtime end to end, including a real job over both tool wires |
 | `node scripts/job.mts` | real jobs against a **live** model — see [What it does, measured](#what-it-does-measured) |
 | `cd android && ./gradlew :app:testDebugUnitTest` | 43 tests on the JVM, for the frozen port |

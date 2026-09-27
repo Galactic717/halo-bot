@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryStore } from './memory.ts';
@@ -36,6 +36,7 @@ function stubComputer(): ComputerPort {
 }
 import { AuditLog, redact, scrub } from './audit.ts';
 import type { AuditRow } from './types.ts';
+import { initLog, log, recentLog } from './log.ts';
 import { preflight } from './scheduler.ts';
 import { checkExpression, matchesExpression } from './expression.ts';
 import { checkEndpoint } from './agui.ts';
@@ -998,4 +999,24 @@ test('the trail is a chain: an edited or deleted row shows, and a restart contin
   assert.equal(removed.intact, false);
   assert.equal(removed.brokenAt, 2);
   assert.match(removed.reason ?? '', /removed or inserted/);
+});
+
+test('the log is one JSON object per line, rolled by size, and never holds a key', () => {
+  const root = mkdtempSync(join(tmpdir(), 'halo-log-'));
+  initLog(root);
+  log('error', 'turn.failed', { agentId: 'a', error: new Error('401 from https://api.example.com with key sk-abcdefghijklmnopqrstuvwxyz') });
+  log('info', 'turn.done', { agentId: 'a', ms: 1234, header: 'Bearer abcdefghijklmnopqrstuvwxyz0123' });
+  const lines = recentLog();
+  assert.equal(lines.length, 2);
+  const [failed, done] = lines.map((l) => JSON.parse(l));
+  assert.equal(failed.event, 'turn.failed');
+  assert.equal(failed.level, 'error');
+  assert.doesNotMatch(lines.join('\n'), /sk-abcdefghij|Bearer abcdefghij/);
+  assert.equal(done.ms, 1234);
+
+  // Past the size limit the file rolls instead of growing without end.
+  const big = 'x'.repeat(1500);
+  for (let i = 0; i < 1600; i++) log('info', 'filler', { big });
+  assert.ok(existsSync(join(root, 'logs', 'halo.log.1')));
+  assert.ok(statSync(join(root, 'logs', 'halo.log')).size < 2 * 1024 * 1024 + 4096);
 });

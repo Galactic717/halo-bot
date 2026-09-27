@@ -113,6 +113,8 @@ const api = {
   auditSummary: (days: number): Promise<{ allowed: number; refused: number; failed: number }> =>
     ipcRenderer.invoke('halo:audit.summary', days),
   auditVerify: (): Promise<AuditVerdict> => ipcRenderer.invoke('halo:audit.verify'),
+  openLogs: (): Promise<string> => ipcRenderer.invoke('halo:openLogs'),
+  diagnostics: (): Promise<string> => ipcRenderer.invoke('halo:diagnostics'),
 
   control: (agentId: string): Promise<ControlState> => ipcRenderer.invoke('halo:control', agentId),
   takeControl: (agentId: string): Promise<void> => ipcRenderer.invoke('halo:control.take', agentId),

@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolSchema } from './provider.ts';
+import { log } from './log.ts';
 
 /** A value the user supplies when installing, either as an env var or as a command argument. */
 export interface McpField {
@@ -261,7 +262,13 @@ export class McpManager {
     await Promise.all(
       this.getSpecs()
         .filter((spec) => spec.enabled !== false)
-        .map((spec) => this.client(spec).start().catch(() => {})),
+        // One plugin that will not start must not stop the others; its status says why, and so
+        // does the log.
+        .map((spec) =>
+          this.client(spec)
+            .start()
+            .catch((error: unknown) => log('warn', 'plugin.start_failed', { plugin: spec.id, error: error instanceof Error ? error : String(error) })),
+        ),
     );
   }
 
