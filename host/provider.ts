@@ -1,6 +1,5 @@
 // The failure-reason vocabulary and retry policy are adapted from Hermes Agent (MIT, (c) 2025 Nous
 // Research). See NOTICE.
-import { randomUUID } from 'node:crypto';
 import type { Settings } from './types.ts';
 
 export interface ChatMessage {
@@ -436,7 +435,7 @@ export function parseContentToolCalls(
     const name = typeof rawName === 'string' ? byLower.get(rawName.trim().toLowerCase()) : undefined;
     if (!name) return false;
     const args = o.args ?? o.arguments ?? o.parameters ?? o.input ?? o.function?.arguments ?? {};
-    calls.push({ id: `call_${randomUUID().slice(0, 8)}`, name, args: toArgs(args) });
+    calls.push({ id: `call_${globalThis.crypto.randomUUID().slice(0, 8)}`, name, args: toArgs(args) });
     return true;
   };
 
@@ -444,7 +443,7 @@ export function parseContentToolCalls(
   for (const m of text.matchAll(/(?:<\|tool_call>\s*)?call:([A-Za-z_]\w*)\s*(\{[\s\S]*?\})\s*(?:<tool_call\|>|$)/g)) {
     const name = byLower.get(m[1]!.toLowerCase());
     if (!name) continue;
-    calls.push({ id: `call_${randomUUID().slice(0, 8)}`, name, args: toArgs(parseLoose(m[2]!)) });
+    calls.push({ id: `call_${globalThis.crypto.randomUUID().slice(0, 8)}`, name, args: toArgs(parseLoose(m[2]!)) });
     cut.push({ start: m.index!, end: m.index! + m[0].length });
   }
   if (calls.length === 0) {
@@ -646,6 +645,39 @@ export async function complete(settings: Settings['provider'], messages: ChatMes
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+export interface ServerInfo {
+  kind: ProviderKind;
+  /** Tokens per request the server will hold, when it says. */
+  contextWindow?: number;
+  /** Whether its chat template can render tool calls; false means the content protocol is the only way. */
+  nativeTools?: boolean;
+}
+
+/**
+ * What Setup can learn about a server beyond its model list. llama.cpp is the one that says the
+ * things that decide whether a bot can act at all: the window it was started with, and whether the
+ * chat template it loaded (--jinja) understands tools.
+ */
+export async function serverInfo(settings: Settings['provider']): Promise<ServerInfo> {
+  const kind = providerKind(settings.baseUrl);
+  if (kind !== 'llamacpp') return { kind };
+  try {
+    const root = endpoint(settings, '').replace(/\/v1$/, '');
+    const res = await fetch(`${root}/props`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return { kind };
+    const json: any = await res.json();
+    const n = Number(json.default_generation_settings?.n_ctx ?? json.n_ctx);
+    const caps = json.chat_template_caps;
+    return {
+      kind,
+      ...(n > 0 ? { contextWindow: n } : {}),
+      ...(caps && typeof caps.supports_tool_calls === 'boolean' ? { nativeTools: caps.supports_tool_calls } : {}),
+    };
+  } catch {
+    return { kind };
   }
 }
 

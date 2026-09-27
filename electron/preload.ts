@@ -30,6 +30,8 @@ const api = {
   models: (): Promise<string[] | { error: string }> => ipcRenderer.invoke('halo:settings.models'),
   probeProvider: (baseUrl: string, apiKey: string): Promise<string[] | { error: string }> =>
     ipcRenderer.invoke('halo:probeProvider', baseUrl, apiKey),
+  serverInfo: (baseUrl: string): Promise<{ kind: string; contextWindow?: number; nativeTools?: boolean }> =>
+    ipcRenderer.invoke('halo:serverInfo', baseUrl),
 
   saveRoutine: (input: Record<string, unknown>): Promise<Routine | null> => ipcRenderer.invoke('halo:routine.save', input),
   deleteRoutine: (id: string): Promise<void> => ipcRenderer.invoke('halo:routine.delete', id),

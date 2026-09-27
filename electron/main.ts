@@ -12,7 +12,7 @@ import { McpManager, type McpServerSpec } from '../host/mcp';
 import { startWebhookServer, type WebhookServer } from './webhook';
 import { MCP_CATALOG } from '../host/catalog';
 import { parseMcpConfig } from '../host/plugins';
-import { listModels, listModelsDetailed, rankModels } from '../host/provider';
+import { listModels, listModelsDetailed, rankModels, serverInfo } from '../host/provider';
 import { parseTrigger } from '../host/tools';
 import { verifyConfinement, type Confinement } from '../host/box';
 import type { Agent, ApprovalDecision, Channel, HaloEvent, Routine, Settings } from '../host/types';
@@ -429,6 +429,8 @@ function registerIpc() {
       return { error: String((error as Error).message ?? error) };
     }
   });
+
+  ipcMain.handle('halo:serverInfo', (_e, baseUrl: string) => serverInfo({ ...store.getSettings().provider, baseUrl }));
 
   ipcMain.handle('halo:settings.models', async () => {
     try {
