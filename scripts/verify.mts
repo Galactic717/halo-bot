@@ -435,6 +435,8 @@ async function realJob() {
   );
   const system = ((native.bodies[0]?.messages as { role: string; content: string }[] | undefined) ?? [])[0]?.content ?? '';
   check(system.length < 7000 && system.includes(FENCE_TAG), 'and the short prompt, fence rules included', `${system.length} chars`);
+  const systems = native.bodies.map((b) => ((b.messages as { content: string }[] | undefined) ?? [])[0]?.content);
+  check(systems.length > 1 && systems.every((x) => x === systems[0]), 'the system prompt is identical on every step, so a local server reuses what it already read');
 
   console.log('\nThe same job on a server that refuses the tools field');
   resetQuirks();

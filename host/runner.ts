@@ -801,6 +801,8 @@ export class Runner implements RunnerPort {
      */
     let workedThisTurn = false;
     let talkOnlySteps = 0;
+    /** The clock, read once per turn so every step of it sends the same prefix. */
+    const turnTime = new Date().toLocaleString('en-GB', { timeZone: settings.timezone });
     /** Whether anything but talking happened this turn; only then can talking be the end of it. */
     let didWork = false;
     let nudgedForDelivery = false;
@@ -890,7 +892,7 @@ export class Runner implements RunnerPort {
         // call, so asking never costs an extra round trip or leaves tool_calls without results.
         if (widgetSent) break;
 
-        const messages: ChatMessage[] = withReplyReminder([
+        const messages: ChatMessage[] = withReplyReminder(turnTime, [
           { role: 'system', content: this.systemPrompt(agent, channelId) },
           ...this.history(historyId, historySuffix),
         ]);
@@ -932,7 +934,7 @@ export class Runner implements RunnerPort {
           compactedForOverflow = true;
           this.systemEvent(agentId, { kind: 'note', label: 'Ran out of context — folding older turns into a summary and trying again' });
           await this.compactIfNeeded(historyId, historySuffix, agentId, abort.signal, true);
-          const retried: ChatMessage[] = withReplyReminder([
+          const retried: ChatMessage[] = withReplyReminder(turnTime, [
             { role: 'system', content: this.systemPrompt(agent, channelId) },
             ...this.history(historyId, historySuffix),
           ]);
@@ -1495,12 +1497,19 @@ function parseConversationKey(key: string): { agentId: string; channelId?: strin
  * Puts the "your text is not delivered" nudge on the last user message of the request.
  * It rides along with the call rather than being stored, so it is never re-sent from history.
  */
-function withReplyReminder(messages: ChatMessage[]): ChatMessage[] {
+/**
+ * The reminder, and the time the turn started, on the user's message rather than in the system prompt.
+ *
+ * A local server reuses what it already read only up to the first token that differs, and the system
+ * prompt is the first thing in every request: a clock there made llama.cpp re-read the whole history on
+ * every step — 90 seconds a step for Gemma 4 26B with its experts on the CPU. Here it changes once a turn.
+ */
+function withReplyReminder(time: string, messages: ChatMessage[]): ChatMessage[] {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
     if (message.role !== 'user') continue;
     const patched = [...messages];
-    patched[i] = { ...message, content: `${message.content}\n\n${REPLY_REMINDER}` };
+    patched[i] = { ...message, content: `${message.content}\n\n${REPLY_REMINDER}\nLocal time when this turn started: ${time}.` };
     return patched;
   }
   return messages;

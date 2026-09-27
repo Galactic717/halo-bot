@@ -4,29 +4,39 @@ Finish line: see top of CLAUDE.md. Decision: **keep** runner/gate/audit/fence/bo
 provider layer; **add** a compact profile for small models and a real-job proof; **freeze** Android.
 
 ## Blocker: a small model cannot act
-- [ ] provider facade: kind detection (llamacpp / ollama / lmstudio / openrouter / openai-compatible)
-- [ ] llama.cpp: retry without stream_options on a 400 that names it; probe /props for n_ctx
-- [ ] tool calls parsed out of content (JSON block, `<tool_call>`, bare `{"name","arguments"}`) when native fails
-- [ ] `toolMode: 'json'` actually works (catalog in prompt, calls parsed from content) — today it sends no tools and parses nothing
-- [ ] compact profile: core tools on the wire + FindTool/UseTool for the rest; short contract prompt
-- [ ] auto-select compact for local/small models; setting to force full/compact
-- [ ] n8n tools off the wire when n8n is disabled
+- [x] provider facade: kind detection (llamacpp / ollama / lmstudio / openrouter / openai-compatible)
+- [x] llama.cpp: retry without stream_options on a 400 that names it; probe /props for n_ctx + tool template
+- [x] tool calls parsed out of content (JSON block, `<tool_call>`, `{"name","arguments"}`, Gemma `call:`) when native returns none
+- [x] `toolMode: 'content'` actually works (catalog in prompt, history rewritten, calls parsed) — the old `json` did nothing
+- [x] a server that rejects `tools` is switched to content on its own, and remembered
+- [x] compact profile: 11 core tools + FindTool/UseTool; ~900-token contract prompt; UseTool unwrapped before the gate
+- [x] auto-select compact for local models; Settings → Model → Profile / Tool calls
+- [x] n8n tools and GenerateImage off the wire when switched off
+- [x] a turn that only keeps talking after it delivered is ended
 
 ## Hosted is first-class
-- [ ] OpenRouter: HTTP-Referer + X-Title, `usage: {include: true}`, cost recorded per call
-- [ ] OpenRouter fallback models (`models: [...]`)
-- [ ] usage rows carry cost; Settings shows it
+- [x] OpenRouter: HTTP-Referer + X-OpenRouter-Title (+ X-Title), cost from usage recorded per call
+- [x] OpenRouter fallback models (`models: [...]`), served model recorded
+- [x] mid-stream error objects surface as errors
+- [x] usage rows carry cost; Settings → Usage shows it
 
 ## Proof of a real job
-- [ ] verify: scripted model does the page-watch job end to end (fetch → diff → changes.md + review.md → SendMessage)
-- [ ] verify: content-mode tool calls drive the same job (model with no native tools)
-- [ ] scripts/job.mts: same job against a live model; run on llama.cpp Gemma 4 E4B
-- [ ] scripts/job.mts on OpenRouter
-- [ ] outbound-drafts job: research list → drafts/ in box, nothing sent
+- [x] verify: scripted model does the page-watch job end to end (native)
+- [x] verify: same job on a server that refuses `tools` (text protocol) + UseTool still gated
+- [x] scripts/job.mts + evals/tasks.mts: page-watch, outbound-drafts, poisoned-page + 8 box chores
+- [x] live on llama.cpp Gemma 4 E4B (baseline 7/11 before the box fixes)
+- [x] live on OpenRouter gemma-4-26b-a4b-it:free — 3/3 web jobs
+- [ ] re-measure on Gemma after the box fixes (running)
+- [ ] live run in the Electron app itself: create a bot, give it the page-watch job, watch tools fire
+
+## Found on the way (all fixed, each with a test)
+- [x] memory extraction after a bot is deleted crashed the process
+- [x] box commands lost every double quote (helper appended the command raw to powershell's command line)
+- [x] Remove-Item / Move-Item / Rename-Item denied on every file in the box (provider walks the box's parents)
+- [x] smart review by a 4B helper raised false ASKs on offline box commands and stalled unattended jobs
 
 ## Truth
-- [ ] Setup: llama.cpp + OpenRouter first, probe says what it found (n_ctx, tools)
-- [ ] README / About: what this build does; Android frozen; no 24/7-with-PC-off claims
-- [ ] docs/WORK_2026_09_27.md
-
-## Found on the way
+- [x] Setup: llama.cpp + OpenRouter first, probe says window + tool template
+- [x] SECURITY.md: parsing calls from text, UseTool is not a boundary, Android frozen
+- [ ] README: measured table, what this build is, Android frozen, not-done list
+- [ ] docs/WORK_2026_09_27.md numbers

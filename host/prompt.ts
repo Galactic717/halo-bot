@@ -23,7 +23,10 @@ export interface PromptInput {
 
 export function buildSystemPrompt(input: PromptInput): string {
   const { agent, settings, boxDir, memory, teammates, routines, skills, channels, channel } = input;
-  const now = new Date().toLocaleString('en-GB', { timeZone: settings.timezone });
+  // The date, not the time: the system prompt is the front of every request, and a clock that ticks
+  // inside it made a local server re-read the whole conversation on every step (the exact time rides
+  // at the end of the request instead — see withReplyReminder in runner.ts).
+  const now = new Date().toLocaleDateString('en-GB', { timeZone: settings.timezone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
   const profile = [
     agent.title ? `Your role: ${agent.title}.` : '',
@@ -198,7 +201,7 @@ CallPluginTool instead. List first so you use a real name and real arguments, th
 or nonsensical, list again before retrying — a plugin can be restarted under you and its arguments renamed.
 
 # Environment
-Windows, PowerShell. Machine ${hostname()}, user ${userInfo().username}. Local time ${now} (${settings.timezone}).
+Windows, PowerShell. Machine ${hostname()}, user ${userInfo().username}. Today is ${now} (${settings.timezone}).
 Approvals are ${settings.autoReview ? 'on' : 'off'}; execution on the user's computer is set to "${settings.localExecution}".`;
 }
 
@@ -211,7 +214,10 @@ Approvals are ${settings.autoReview ? 'on' : 'off'}; execution on the user's com
  */
 export function buildCompactPrompt(input: PromptInput): string {
   const { agent, settings, boxDir, memory, teammates, routines, channel } = input;
-  const now = new Date().toLocaleString('en-GB', { timeZone: settings.timezone });
+  // The date, not the time: the system prompt is the front of every request, and a clock that ticks
+  // inside it made a local server re-read the whole conversation on every step (the exact time rides
+  // at the end of the request instead — see withReplyReminder in runner.ts).
+  const now = new Date().toLocaleDateString('en-GB', { timeZone: settings.timezone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const mates = teammates.filter((t) => t.id !== agent.id).slice(0, 20).map((t) => `${t.name}${t.title ? ` (${t.title})` : ''}`);
   return `You are ${agent.name}, an AI teammate inside Halo Bot on the user's Windows PC.${agent.title ? ` Role: ${agent.title}.` : ''}${agent.description ? ` ${agent.description}` : ''}
 You do the work yourself with tools, then report. Never describe a tool call — make it.
@@ -250,5 +256,5 @@ ${routines.join('\n')}
 # Room
 You are in the "${channel.name}" room with ${channel.members.join(', ')} and the user. Everyone sees what you send. Answer only what is yours; @Name only when that teammate must act.
 ` : ''}
-Machine ${hostname()}, local time ${now} (${settings.timezone}).`;
+Machine ${hostname()}. Today is ${now} (${settings.timezone}).`;
 }
