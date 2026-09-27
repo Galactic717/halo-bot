@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boxHelper, confineBox, confinementProblem, forgetBox, verifyConfinement } from './box.ts';
@@ -171,6 +171,18 @@ test('double quotes in a box command reach PowerShell intact', { skip }, () => {
   // Appended raw to the command line, powershell.exe split these off and ran `Write-Output two words`.
   const out = inBox(box, 'Write-Output "two words"; $s = \'{"name":"Olena"}\' | ConvertFrom-Json; $s.name; "{0}-{1}" -f 1, 2');
   assert.match(out, /^two words\r?\nOlena\r?\n1-2$/, out);
+});
+
+test('a box writes UTF-8 and culture-neutral data, and prints UTF-8', { skip }, () => {
+  const box = nestedBox();
+  // Windows PowerShell 5.1 would write UTF-16 for >, the ANSI code page for Set-Content, a #TYPE line
+  // on Export-Csv, the user's decimal comma inside a CSV, and OEM bytes on stdout.
+  const out = inBox(box, '"Андрій" > a.txt; Set-Content b.txt "Марта"; [pscustomobject]@{total=9.5} | Export-Csv c.csv; Write-Output "Богдан"');
+  assert.match(out, /^Богдан$/, out);
+  const text = (name: string) => readFileSync(join(box, name), 'utf8').replace(/^\uFEFF/, '');
+  assert.match(text('a.txt'), /^Андрій\r?\n$/);
+  assert.match(text('b.txt'), /^Марта\r?\n$/);
+  assert.equal(text('c.csv').replace(/\r\n/g, '\n'), '"total"\n"9.5"\n');
 });
 
 test('a bot can rename, move and delete files in its own box, the host\'s and its own', { skip }, () => {

@@ -642,12 +642,23 @@ fn box_location(box_dir: &str, cwd: &str) -> String {
         .trim_start_matches('\\');
     let quote = |s: &str| s.replace('\'', "''");
     format!(
-        "Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Management\", \"$PSHOME\\Modules\\Microsoft.PowerShell.Utility\"; $null = New-PSDrive -Name Box -PSProvider FileSystem -Root '{}'; Set-Location -LiteralPath 'Box:\\{}'; {}",
+        "Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Management\", \"$PSHOME\\Modules\\Microsoft.PowerShell.Utility\"; $null = New-PSDrive -Name Box -PSProvider FileSystem -Root '{}'; Set-Location -LiteralPath 'Box:\\{}'; {} {}",
         quote(root),
         quote(inside),
+        UTF8,
         NATIVE_PATHS
     )
 }
+
+/// Windows PowerShell 5.1's text defaults, made UTF-8 and culture-neutral.
+///
+/// Out of the box `>` writes UTF-16, Set-Content writes the ANSI code page (so Cyrillic becomes `?`),
+/// Export-Csv puts a `#TYPE` line on top, and stdout goes out in the OEM code page, which Halo then
+/// reads as UTF-8. A small model writing names.txt with `>` produced a file every other tool read as
+/// binary. UTF-8 here still carries a BOM — 5.1 has no way to write without one from these cmdlets.
+/// The culture is invariant because what a box writes is data: on a Ukrainian Windows 9.5 went into a
+/// CSV as "9,5". The bot talks to the user through SendMessage, not through PowerShell's formatting.
+const UTF8: &str = "[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; $PSDefaultParameterValues = @{ 'Out-File:Encoding' = 'utf8'; 'Set-Content:Encoding' = 'utf8'; 'Add-Content:Encoding' = 'utf8'; 'Export-Csv:Encoding' = 'utf8'; 'Export-Csv:NoTypeInformation' = $true };";
 
 /// Remove-Item, Move-Item and Rename-Item, taking native paths.
 ///
