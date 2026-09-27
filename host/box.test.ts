@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boxHelper, confineBox, confinementProblem, forgetBox, verifyConfinement } from './box.ts';
@@ -155,4 +155,33 @@ test("a deleted bot's container goes with it", { skip }, () => {
   assert.equal(created.length, 1, 'using a box creates exactly one container profile');
   forgetBox(box);
   assert.equal(containers().has(created[0]!), false);
+});
+
+/** A box nested the way the app nests one, under folders the container may not look at. */
+function nestedBox(): string {
+  const box = join(mkdtempSync(join(tmpdir(), 'halo-nest-')), 'agents', 'bot', 'box');
+  mkdirSync(box, { recursive: true });
+  assert.ok(confineBox(box));
+  made.push(box);
+  return box;
+}
+
+test('double quotes in a box command reach PowerShell intact', { skip }, () => {
+  const box = nestedBox();
+  // Appended raw to the command line, powershell.exe split these off and ran `Write-Output two words`.
+  const out = inBox(box, 'Write-Output "two words"; $s = \'{"name":"Olena"}\' | ConvertFrom-Json; $s.name; "{0}-{1}" -f 1, 2');
+  assert.match(out, /^two words\r?\nOlena\r?\n1-2$/, out);
+});
+
+test('a bot can rename, move and delete files in its own box, the host\'s and its own', { skip }, () => {
+  const box = nestedBox();
+  writeFileSync(join(box, 'a.log'), 'a');
+  writeFileSync(join(box, 'b.log'), 'b');
+  writeFileSync(join(box, 'keep.txt'), 'k');
+  // Through the Box: drive the provider walked the folders above the box to fix up casing, and the
+  // container may not see those, so all three failed with "Access is denied" while writes worked.
+  const out = inBox(box, 'New-Item -ItemType Directory logs | Out-Null; Move-Item *.log logs; Rename-Item keep.txt kept.txt; New-Item -ItemType File tmp.txt | Out-Null; rm tmp.txt; Get-ChildItem -Recurse -Name');
+  assert.doesNotMatch(out, /denied/i, out);
+  assert.deepEqual(readdirSync(box).filter((n) => !n.startsWith('.')).sort(), ['kept.txt', 'logs']);
+  assert.deepEqual(readdirSync(join(box, 'logs')).sort(), ['a.log', 'b.log']);
 });
