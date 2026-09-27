@@ -137,3 +137,31 @@ test('FindTool finds what is off the wire, with its arguments', () => {
   assert.match(out, /args: \{/);
   assert.match(findTools('', TOOLS.map((t) => t.schema)), /- ExternalShell — /);
 });
+
+test('a rate-limited model hands the call to the next fallback, and says which one answered', async () => {
+  resetQuirks();
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+      const model = (JSON.parse(raw) as { model: string }).model;
+      seen.push(model);
+      if (model === 'busy:free') return void res.writeHead(429).end('{"error":{"message":"busy:free is temporarily rate-limited upstream"}}');
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ model, choices: [{ index: 0, delta: { content: 'ok' } }] })}\n\n`);
+      res.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+    const provider = { ...DEFAULT_SETTINGS.provider, baseUrl: url, model: 'busy:free', fallbackModels: ['calm:free'] };
+    const result = await chat(provider, [{ role: 'user', content: 'hi' }], [], () => {});
+    assert.equal(result.text, 'ok');
+    assert.equal(result.model, 'calm:free');
+    assert.deepEqual(seen, ['busy:free', 'calm:free']);
+  } finally {
+    server.close();
+  }
+});

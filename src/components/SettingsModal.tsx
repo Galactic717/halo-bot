@@ -387,7 +387,7 @@ function Model({ settings, onSave }: { settings: Settings; onSave: SettingsModal
             onChange={(e) => setProvider({ ...provider, fallbackModels: e.target.value.split(',').map((m) => m.trim()).filter(Boolean) })}
             onBlur={() => commit({})}
           />
-          <div className="setting-row__desc">OpenRouter tries these in order when the main model fails. Usage shows which one answered.</div>
+          <div className="setting-row__desc">Tried in order when the main model is rate limited or failing — free models often are. Usage shows which one answered.</div>
         </div>
       )}
       <div className="field">

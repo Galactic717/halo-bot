@@ -127,6 +127,8 @@ interface Outcome {
   promptTokens: number;
   completionTokens: number;
   costUsd: number;
+  /** The models that actually answered — a router may have fallen back. */
+  servedBy: string[];
   tools: string[];
   refusedApprovals: number;
   /** What was asked for and refused, so a bot reaching past its box is visible in the report. */
@@ -217,6 +219,7 @@ async function runCase(c: (typeof CASES)[number], provider: Settings['provider']
     promptTokens: usage.reduce((n, u) => n + u.promptTokens, 0),
     completionTokens: usage.reduce((n, u) => n + u.completionTokens, 0),
     costUsd: usage.reduce((n, u) => n + (u.costUsd ?? 0), 0),
+    servedBy: [...new Set(usage.map((u) => u.model))],
     tools: calls.map((x) => x.name),
     refusedApprovals: refused.length,
     refused,
@@ -265,7 +268,7 @@ async function main() {
       console.log(
         `  ${o.pass ? 'PASS' : 'FAIL'}  ${o.id.padEnd(17)} ${String(o.seconds).padStart(4)}s  ${String(o.modelCalls).padStart(2)} calls  ` +
           `${(o.promptTokens / 1000).toFixed(1)}k in  ${o.costUsd ? `$${o.costUsd.toFixed(4)}  ` : ''}` +
-          `tools: ${o.tools.join(' ') || '(none)'}${o.refusedApprovals ? `  refused approvals: ${o.refusedApprovals}` : ''}${o.note ? `\n        ${o.note}` : ''}`,
+          `${o.servedBy.length > 1 || (o.servedBy[0] && o.servedBy[0] !== model) ? `served by ${o.servedBy.join(', ')}  ` : ''}tools: ${o.tools.join(' ') || '(none)'}${o.refusedApprovals ? `  refused approvals: ${o.refusedApprovals}` : ''}${o.note ? `\n        ${o.note}` : ''}`,
       );
       for (const r of o.refused) console.log(`        refused ${r}`);
       if (!o.pass) {

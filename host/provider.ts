@@ -268,12 +268,20 @@ export async function chat(
   signal?: AbortSignal,
 ): Promise<ChatResult> {
   let lastError: unknown;
+  /*
+   * Fallback models, tried in order when the current one is rate limited, missing or failing.
+   * OpenRouter's own `models` list does not cover this: on 27 September both free models asked for
+   * came back "temporarily rate-limited upstream" as a plain 429, and the fallback in the request
+   * was never tried. So Halo moves down the list itself.
+   */
+  let current = settings;
+  let fallbacks = (settings.fallbackModels ?? []).map((m) => m.trim()).filter((m) => m && m !== settings.model);
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     let streamedAnything = false;
-    const content = tools.length > 0 && usesContentTools(settings);
+    const content = tools.length > 0 && usesContentTools(current);
     try {
       const result = await chatOnce(
-        settings,
+        current,
         content ? toContentProtocol(messages, tools) : messages,
         content ? [] : tools,
         (chunk) => {
@@ -292,14 +300,22 @@ export async function chat(
       if (signal?.aborted || streamedAnything) throw error;
       // Two refusals that are about the request's shape, not the moment: fix the shape, go again, and
       // remember it so the next call does not pay for the same 400.
-      if (rejectsStreamOptions(error) && !quirksOf(settings).noStreamOptions) {
-        quirksOf(settings).noStreamOptions = true;
+      if (rejectsStreamOptions(error) && !quirksOf(current).noStreamOptions) {
+        quirksOf(current).noStreamOptions = true;
         attempt--;
         continue;
       }
       if (!content && tools.length > 0 && rejectsTools(error)) {
-        quirksOf(settings).contentTools = true;
+        quirksOf(current).contentTools = true;
         attempt--;
+        continue;
+      }
+      const reason = classifyProviderError(error);
+      if (fallbacks.length > 0 && (isRetryable(reason) || reason === 'model_unavailable')) {
+        const [next, ...rest] = fallbacks;
+        fallbacks = rest;
+        current = { ...current, model: next!, fallbackModels: rest };
+        attempt = -1;
         continue;
       }
       if (!isTransient(error) || attempt === RETRY_DELAYS_MS.length) throw error;
@@ -614,7 +630,7 @@ async function chatOnce(
     text,
     finishReason,
     usage,
-    ...(servedBy ? { model: servedBy } : {}),
+    model: servedBy ?? settings.model,
     toolCalls: [...calls.values()].filter((c) => c.name).map((c) => ({ id: c.id, name: c.name, args: parseArgs(c.args) })),
   };
 }

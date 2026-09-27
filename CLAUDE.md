@@ -35,5 +35,11 @@
 - npm is not on the Bash tool PATH here — run npm through PowerShell.
 - Commits are authored by the owner only: no Co-Authored-By / "Generated with" lines.
 - Never print or commit keys. OpenRouter key: `D:\openrouterAPI.md` → env `OPENROUTER_API_KEY` at run time.
-- llama.cpp: `D:\llm\llama.cpp\llama-server.exe -m D:\llm\gemma-4-E4B-it-Q4_0.gguf -c 16384 -ngl 99 --jinja --port 8080`.
+- llama.cpp, small: `D:\llm\llama.cpp\llama-server.exe -m D:\llm\gemma-4-E4B-it-Q4_0.gguf -c 16384 -ngl 99 --jinja --port 8080`.
+- llama.cpp, the one that does the jobs: `… -m E:\llm\gemma-4-26B-A4B-it\gemma-4-26B-A4B-it-UD-IQ4_XS.gguf -c 16384 -ngl 99 --n-cpu-moe 24 --jinja -np 1 --port 8080`
+  (5.4 GB VRAM, ~27 tok/s prefill, ~5–9 tok/s generation). Prefill is the cost: never put anything that
+  changes per step into the system prompt — llama.cpp reuses its cache only up to the first differing token.
+- OpenRouter free models only (`:free`); 50 requests/day on this account.
+- The owner's app data (`%APPDATA%\Halo Bot`) had its old bots moved to `_archive_2026-09-27\` on request —
+  moved, not deleted.
 - Track work in `TASKS.md`. End-of-shift log goes in `docs/WORK_<date>.md`, brutal register.
