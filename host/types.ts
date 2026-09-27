@@ -57,6 +57,8 @@ export interface UsageRow {
   promptTokens: number;
   completionTokens: number;
   seconds: number;
+  /** What the provider says the call cost, in USD. Only hosted routers report it. */
+  costUsd?: number;
 }
 
 export interface Channel {
@@ -274,8 +276,21 @@ export interface Settings {
     baseUrl: string;
     apiKey: string;
     model: string;
-    /** some local servers ignore the tools field; keep a switch for the JSON fallback protocol */
-    toolMode: 'native' | 'json';
+    /**
+     * native: tools go in the request's `tools` field, and a call the model writes into its text is
+     * still picked up. content: no `tools` field at all — the catalog goes in the prompt and calls are
+     * parsed out of the reply, for servers and small models whose native tool calling is broken.
+     * A server that rejects `tools` is switched to content on its own; this forces it from the start.
+     */
+    toolMode: 'native' | 'content';
+    /**
+     * full: every tool on the wire and the long prompt. compact: a dozen core tools, FindTool/UseTool
+     * for the rest, and a short prompt — what a ~4B model can hold. auto: compact for a model on this
+     * machine, full for a hosted one.
+     */
+    profile: 'auto' | 'full' | 'compact';
+    /** OpenRouter only: models to fall back to, in order, when the main one fails. */
+    fallbackModels: string[];
     maxSteps: number;
     /** Cheap model for memory extraction and risk review; empty means reuse the main one. */
     helperModel: string;

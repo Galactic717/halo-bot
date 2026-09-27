@@ -562,8 +562,8 @@ function HiddenBots() {
 function Usage() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState<{
-    totals: { prompt: number; completion: number; turns: number; seconds: number };
-    byAgent: { id: string; name: string; prompt: number; completion: number; turns: number; seconds: number }[];
+    totals: { prompt: number; completion: number; turns: number; seconds: number; cost: number };
+    byAgent: { id: string; name: string; prompt: number; completion: number; turns: number; seconds: number; cost: number }[];
   } | null>(null);
 
   useEffect(() => {
@@ -577,7 +577,7 @@ function Usage() {
       <h2>Usage</h2>
       <div className="setting-row__desc" style={{ marginTop: -12, marginBottom: 16 }}>
         Counted from what your model server reports. Local models cost nothing but time — the seconds column is the one
-        that matters there.
+        that matters there. Cost is shown only where the server reports it (OpenRouter does).
       </div>
 
       <div className="tabs" style={{ width: 'fit-content', marginBottom: 16 }}>
@@ -605,6 +605,12 @@ function Usage() {
           <span className="usage-card__value">{data ? `${Math.round(data.totals.seconds / 60)}m` : '—'}</span>
           <span className="usage-card__label">thinking time</span>
         </div>
+        {data && data.totals.cost > 0 && (
+          <div className="usage-card">
+            <span className="usage-card__value">${data.totals.cost.toFixed(data.totals.cost < 1 ? 4 : 2)}</span>
+            <span className="usage-card__label">reported cost</span>
+          </div>
+        )}
       </div>
 
       <div className="section-label" style={{ marginTop: 24 }}>By bot</div>
@@ -615,7 +621,7 @@ function Usage() {
             <div className="setting-row__text">
               <div>{row.name}</div>
               <div className="setting-row__desc">
-                {row.turns} calls · {Math.round(row.seconds)}s
+                {row.turns} calls · {Math.round(row.seconds)}s{row.cost > 0 ? ` · $${row.cost.toFixed(4)}` : ''}
               </div>
             </div>
             <span className="setting-row__desc">

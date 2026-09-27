@@ -9,10 +9,12 @@ import { forgetBox } from './box.ts';
 
 export const DEFAULT_SETTINGS: Settings = {
   provider: {
-    baseUrl: 'http://localhost:11434/v1',
-    apiKey: 'ollama',
+    baseUrl: 'http://localhost:8080/v1',
+    apiKey: '',
     model: '',
     toolMode: 'native',
+    profile: 'auto',
+    fallbackModels: [],
     maxSteps: 24,
     helperModel: '',
     contextBudget: 12000,

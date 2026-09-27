@@ -1,5 +1,6 @@
 // The failure-reason vocabulary and retry policy are adapted from Hermes Agent (MIT, (c) 2025 Nous
 // Research). See NOTICE.
+import { randomUUID } from 'node:crypto';
 import type { Settings } from './types.ts';
 
 export interface ChatMessage {
@@ -49,7 +50,9 @@ export interface ChatResult {
   text: string;
   toolCalls: { id: string; name: string; args: Record<string, unknown> }[];
   finishReason: string;
-  usage: { promptTokens: number; completionTokens: number };
+  usage: { promptTokens: number; completionTokens: number; costUsd?: number };
+  /** The model that actually answered, when the server says — a router may have fallen back. */
+  model?: string;
 }
 
 /**
@@ -164,9 +167,95 @@ function isTransient(error: unknown): boolean {
   return isRetryable(classifyProviderError(error));
 }
 
+// ------------------------------------------------------------------ kinds of server
+
+/**
+ * Which server is on the other end, read off the address.
+ *
+ * They all speak /chat/completions, and they all differ in the parts that decide whether a bot can
+ * act: OpenRouter wants to be told who is calling and can report what a call cost, llama.cpp only
+ * parses tool calls with --jinja and older builds reject stream_options, Ollama answers a model that
+ * cannot take tools with a 400. Treating them as one server is how a Setup label passed for support.
+ */
+export type ProviderKind = 'llamacpp' | 'ollama' | 'lmstudio' | 'openrouter' | 'openai';
+
+export function providerKind(baseUrl: string): ProviderKind {
+  const url = baseUrl.toLowerCase();
+  if (url.includes('openrouter.ai')) return 'openrouter';
+  if (/:11434(\/|$)/.test(url)) return 'ollama';
+  if (/:1234(\/|$)/.test(url)) return 'lmstudio';
+  if (/:8080(\/|$)/.test(url) || /\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(url)) return 'llamacpp';
+  return 'openai';
+}
+
+/** A server on this machine, where every token is free and the window is whatever the user loaded. */
+export function isLocalKind(kind: ProviderKind): boolean {
+  return kind === 'llamacpp' || kind === 'ollama' || kind === 'lmstudio';
+}
+
+/** Where OpenRouter's app attribution points. It shows up on their dashboard next to the spend. */
+const APP_URL = 'https://github.com/Galactic717/halo-bot';
+
+export function requestHeaders(settings: Settings['provider']): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}),
+    ...(providerKind(settings.baseUrl) === 'openrouter' ? { 'HTTP-Referer': APP_URL, 'X-Title': 'Halo Bot' } : {}),
+  };
+}
+
+/**
+ * What one server has been caught refusing, so the next call does not ask again.
+ * Keyed by address and model: one llama.cpp build rejects stream_options, the next one does not.
+ */
+interface Quirks {
+  noStreamOptions?: boolean;
+  /** The server rejected the `tools` field; calls go through the content protocol instead. */
+  contentTools?: boolean;
+}
+const quirks = new Map<string, Quirks>();
+const quirkKey = (settings: Settings['provider']) => `${settings.baseUrl.trim().replace(/\/+$/, '')}|${settings.model}`;
+function quirksOf(settings: Settings['provider']): Quirks {
+  const key = quirkKey(settings);
+  let q = quirks.get(key);
+  if (!q) quirks.set(key, (q = {}));
+  return q;
+}
+/** For tests: forget what servers were caught doing. */
+export function resetQuirks() {
+  quirks.clear();
+}
+
+/** A 4xx that names stream_options: the server does not know the field, not a broken request. */
+function rejectsStreamOptions(error: unknown): boolean {
+  return error instanceof ProviderError && (error.status ?? 0) >= 400 && /stream_options/i.test(error.message);
+}
+
+/**
+ * A server or model that will not take the `tools` field at all.
+ * Ollama: "does not support tools". OpenRouter: "No endpoints found that support tool use".
+ * llama.cpp without --jinja: "tools param requires --jinja flag".
+ */
+function rejectsTools(error: unknown): boolean {
+  if (!(error instanceof ProviderError) || (error.status ?? 0) < 400) return false;
+  return /tool/i.test(error.message) && /support|require|jinja|not allowed|no endpoints|unsupported|unrecognized|unknown/i.test(error.message);
+}
+
+/** Whether this call goes out with a `tools` field, or with the catalog written into the prompt. */
+export function usesContentTools(settings: Settings['provider']): boolean {
+  return settings.toolMode === 'content' || quirksOf(settings).contentTools === true;
+}
+
 /**
  * Streams one completion, retrying transient failures.
  * A retry only happens before any text has been streamed, so the user never sees a doubled answer.
+ *
+ * Tool calling has two wires and one result. Natively, the schemas go in `tools` and calls come back
+ * as `tool_calls` — and when a model writes its call into the text instead, which small models and
+ * half-configured servers both do, it is picked up from there rather than delivered as prose that
+ * never reaches anyone. Through the content protocol the catalog is written into the system prompt,
+ * the history is rewritten into plain turns, and calls are parsed out of the reply. The caller sees
+ * the same ChatResult either way.
  */
 export async function chat(
   settings: Settings['provider'],
@@ -178,24 +267,206 @@ export async function chat(
   let lastError: unknown;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     let streamedAnything = false;
+    const content = tools.length > 0 && usesContentTools(settings);
     try {
-      return await chatOnce(
+      const result = await chatOnce(
         settings,
-        messages,
-        tools,
+        content ? toContentProtocol(messages, tools) : messages,
+        content ? [] : tools,
         (chunk) => {
           streamedAnything = true;
           onDelta(chunk);
         },
         signal,
       );
+      if (result.toolCalls.length === 0 && tools.length > 0) {
+        const parsed = parseContentToolCalls(result.text, tools.map((t) => t.name));
+        if (parsed.calls.length > 0) return { ...result, text: parsed.rest, toolCalls: parsed.calls, finishReason: 'tool_calls' };
+      }
+      return result;
     } catch (error) {
       lastError = error;
-      if (signal?.aborted || streamedAnything || !isTransient(error) || attempt === RETRY_DELAYS_MS.length) throw error;
+      if (signal?.aborted || streamedAnything) throw error;
+      // Two refusals that are about the request's shape, not the moment: fix the shape, go again, and
+      // remember it so the next call does not pay for the same 400.
+      if (rejectsStreamOptions(error) && !quirksOf(settings).noStreamOptions) {
+        quirksOf(settings).noStreamOptions = true;
+        attempt--;
+        continue;
+      }
+      if (!content && tools.length > 0 && rejectsTools(error)) {
+        quirksOf(settings).contentTools = true;
+        attempt--;
+        continue;
+      }
+      if (!isTransient(error) || attempt === RETRY_DELAYS_MS.length) throw error;
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
     }
   }
   throw lastError;
+}
+
+// --------------------------------------------------------- the content protocol
+
+/** `Name(a: string, b?: number) — first sentence of the description.` One line a small model can read. */
+export function catalogLine(schema: ToolSchema): string {
+  const props = (schema.parameters.properties ?? {}) as Record<string, { type?: string; enum?: unknown[] }>;
+  const required = new Set((schema.parameters.required as string[] | undefined) ?? []);
+  const params = Object.entries(props)
+    .map(([name, p]) => `${name}${required.has(name) ? '' : '?'}: ${p.enum ? p.enum.map((v) => JSON.stringify(v)).join('|') : (p.type ?? 'any')}`)
+    .join(', ');
+  const first = schema.description.split(/(?<=\.)\s/)[0]?.trim() ?? '';
+  return `- ${schema.name}(${params}) — ${first.slice(0, 200)}`;
+}
+
+export function contentProtocolRules(tools: ToolSchema[]): string {
+  return `# Calling tools
+You act by calling tools, never by describing what you would do. To call one, write a JSON block like this:
+\`\`\`json
+{"tool": "Write", "args": {"path": "notes.md", "content": "first line"}}
+\`\`\`
+Several blocks in one reply run in order. Each result comes back in the next message; then carry on.
+Use only these tools, with exactly these argument names:
+${tools.map(catalogLine).join('\n')}`;
+}
+
+/**
+ * Rewrites a native tool-calling history into plain turns, for a server that is not sent `tools`.
+ *
+ * Such a server either rejects `tool` roles and `tool_calls` fields or renders them into a template
+ * the model was never trained on. So an assistant call becomes the JSON block the model is told to
+ * write, a result becomes a user turn that says whose result it is, and consecutive turns of one role
+ * are merged — Gemma's chat template refuses two user turns in a row.
+ */
+export function toContentProtocol(messages: ChatMessage[], tools: ToolSchema[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  const push = (m: ChatMessage) => {
+    const last = out[out.length - 1];
+    if (last && last.role === m.role && m.role !== 'system') {
+      last.content = [last.content, m.content].filter(Boolean).join('\n\n');
+      if (m.images?.length) last.images = [...(last.images ?? []), ...m.images];
+      return;
+    }
+    out.push({ ...m });
+  };
+  let systemDone = false;
+  for (const m of messages) {
+    if (m.role === 'system' && !systemDone) {
+      push({ role: 'system', content: `${m.content}\n\n${contentProtocolRules(tools)}` });
+      systemDone = true;
+    } else if (m.role === 'assistant') {
+      const blocks = (m.tool_calls ?? []).map((c) => {
+        let args: unknown = {};
+        try { args = JSON.parse(c.function.arguments || '{}'); } catch { args = c.function.arguments; }
+        return '```json\n' + JSON.stringify({ tool: c.function.name, args }) + '\n```';
+      });
+      push({ role: 'assistant', content: [m.content, ...blocks].filter((s) => s && s.trim()).join('\n') || '(no reply)' });
+    } else if (m.role === 'tool') {
+      push({ role: 'user', content: `Result of ${m.name ?? 'the tool'}:\n${m.content}` });
+    } else {
+      const { tool_calls: _calls, tool_call_id: _id, name: _name, ...rest } = m;
+      push(rest);
+    }
+  }
+  if (!systemDone) out.unshift({ role: 'system', content: contentProtocolRules(tools) });
+  return out;
+}
+
+/** Every balanced `{...}` in the text, outermost only, with where it sat. Strings are respected. */
+function objectSpans(text: string): { start: number; end: number }[] {
+  const spans: { start: number; end: number }[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = depth > 0;
+    else if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0) spans.push({ start, end: i + 1 });
+    }
+  }
+  return spans;
+}
+
+/** JSON, or the looser dialect Gemma leaks when its template is not applied: bare keys, <|"|> quotes. */
+function parseLoose(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const fixed = raw
+      .replace(/<\|"\|>/g, '"')
+      .replace(/([{,]\s*)([A-Za-z_][\w-]*)\s*:/g, '$1"$2":')
+      .replace(/,\s*([}\]])/g, '$1');
+    try { return JSON.parse(fixed); } catch { return undefined; }
+  }
+}
+
+/**
+ * Tool calls a model wrote into its reply instead of the tool_calls field.
+ *
+ * Accepts the shapes models actually produce: our `{"tool","args"}` block, OpenAI's
+ * `{"name","arguments"}`, Hermes-style `<tool_call>` tags, Gemma's `call:Name{...}`, and lists of
+ * any of them. Only names in `known` count, so a reply that merely contains some JSON — a file it
+ * is quoting, `{"name": "Olena"}` — is never mistaken for a call. What is left is the prose around them.
+ */
+export function parseContentToolCalls(
+  text: string,
+  known: string[],
+): { calls: { id: string; name: string; args: Record<string, unknown> }[]; rest: string } {
+  const byLower = new Map(known.map((n) => [n.toLowerCase(), n]));
+  const calls: { id: string; name: string; args: Record<string, unknown> }[] = [];
+  const cut: { start: number; end: number }[] = [];
+  const toArgs = (v: unknown): Record<string, unknown> =>
+    typeof v === 'string' ? parseArgs(v) : v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const take = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.map(take).some(Boolean);
+    const o = value as Record<string, any>;
+    if (Array.isArray(o.tool_calls)) return take(o.tool_calls);
+    const rawName = o.tool ?? o.name ?? o.tool_name ?? o.function?.name;
+    const name = typeof rawName === 'string' ? byLower.get(rawName.trim().toLowerCase()) : undefined;
+    if (!name) return false;
+    const args = o.args ?? o.arguments ?? o.parameters ?? o.input ?? o.function?.arguments ?? {};
+    calls.push({ id: `call_${randomUUID().slice(0, 8)}`, name, args: toArgs(args) });
+    return true;
+  };
+
+  // Gemma's own call syntax, when the server did not turn it into tool_calls.
+  for (const m of text.matchAll(/(?:<\|tool_call>\s*)?call:([A-Za-z_]\w*)\s*(\{[\s\S]*?\})\s*(?:<tool_call\|>|$)/g)) {
+    const name = byLower.get(m[1]!.toLowerCase());
+    if (!name) continue;
+    calls.push({ id: `call_${randomUUID().slice(0, 8)}`, name, args: toArgs(parseLoose(m[2]!)) });
+    cut.push({ start: m.index!, end: m.index! + m[0].length });
+  }
+  if (calls.length === 0) {
+    for (const span of objectSpans(text)) {
+      if (take(parseLoose(text.slice(span.start, span.end)))) cut.push(span);
+    }
+  }
+  if (calls.length === 0) return { calls, rest: text };
+
+  let rest = '';
+  let at = 0;
+  for (const span of cut.sort((a, b) => a.start - b.start)) {
+    rest += text.slice(at, span.start);
+    at = span.end;
+  }
+  rest += text.slice(at);
+  rest = rest
+    .replace(/```(?:json|tool_call|tool_code)?\s*```/g, '')
+    .replace(/<\/?tool_call>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return { calls, rest };
 }
 
 /**
@@ -223,14 +494,21 @@ async function chatOnce(
   signal?: AbortSignal,
 ): Promise<ChatResult> {
   const url = endpoint(settings, '/chat/completions');
+  const kind = providerKind(settings.baseUrl);
   const body: Record<string, unknown> = {
     model: settings.model,
     messages: wireMessages(messages),
     stream: true,
-    // Most OpenAI-compatible servers send a final usage chunk when asked; the rest ignore it.
-    stream_options: { include_usage: true },
   };
-  if (tools.length > 0 && settings.toolMode === 'native') {
+  // Most OpenAI-compatible servers send a final usage chunk when asked; an older llama.cpp 400s.
+  if (!quirksOf(settings).noStreamOptions) body.stream_options = { include_usage: true };
+  if (kind === 'openrouter') {
+    // Usage accounting puts the call's price in the last chunk; `models` is OpenRouter's own fallback.
+    body.usage = { include: true };
+    const fallbacks = (settings.fallbackModels ?? []).map((m) => m.trim()).filter((m) => m && m !== settings.model);
+    if (fallbacks.length) body.models = [settings.model, ...fallbacks];
+  }
+  if (tools.length > 0) {
     body.tools = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
     body.tool_choice = 'auto';
   }
@@ -249,10 +527,7 @@ async function chatOnce(
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}),
-      },
+      headers: requestHeaders(settings),
       body: JSON.stringify(body),
       signal: guard.signal,
     });
@@ -272,13 +547,15 @@ async function chatOnce(
 
   let text = '';
   let finishReason = 'stop';
-  let usage = { promptTokens: 0, completionTokens: 0 };
+  let usage: ChatResult['usage'] = { promptTokens: 0, completionTokens: 0 };
+  let servedBy: string | undefined;
   const calls = new Map<number, { id: string; name: string; args: string }>();
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
+  let streamError: ProviderError | undefined;
+  read: for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     touch();
@@ -292,11 +569,18 @@ async function chatOnce(
       if (payload === '[DONE]') continue;
       let json: any;
       try { json = JSON.parse(payload); } catch { continue; }
+      if (typeof json.model === 'string' && json.model) servedBy = json.model;
       if (json.usage) {
         usage = {
           promptTokens: json.usage.prompt_tokens ?? usage.promptTokens,
           completionTokens: json.usage.completion_tokens ?? usage.completionTokens,
+          ...(typeof json.usage.cost === 'number' ? { costUsd: json.usage.cost } : usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
         };
+      }
+      // A mid-stream error: OpenRouter reports a provider failing after the 200 this way.
+      if (json.error && !json.choices) {
+        streamError = new ProviderError(String(json.error.message ?? JSON.stringify(json.error)), Number(json.error.code) || undefined);
+        break read;
       }
       const choice = json.choices?.[0];
       if (!choice) continue;
@@ -319,11 +603,16 @@ async function chatOnce(
 
   clearTimeout(idleTimer);
   signal?.removeEventListener('abort', onAbort);
+  if (streamError) {
+    await reader.cancel().catch(() => {});
+    throw streamError;
+  }
 
   return {
     text,
     finishReason,
     usage,
+    ...(servedBy ? { model: servedBy } : {}),
     toolCalls: [...calls.values()].filter((c) => c.name).map((c) => ({ id: c.id, name: c.name, args: parseArgs(c.args) })),
   };
 }
@@ -344,7 +633,7 @@ export async function complete(settings: Settings['provider'], messages: ChatMes
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}) },
+      headers: requestHeaders(settings),
       body: JSON.stringify({ model: settings.model, messages: wireMessages(messages), stream: false }),
       signal: guard.signal,
     });
@@ -411,7 +700,7 @@ export function rankModels(models: ModelInfo[], memoryBytes: number): ModelInfo[
 
 export async function listModels(settings: Settings['provider']): Promise<string[]> {
   const url = endpoint(settings, '/models');
-  const res = await fetch(url, { headers: settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {} });
+  const res = await fetch(url, { headers: requestHeaders(settings) });
   if (!res.ok) throw new ProviderError(`${res.status} ${res.statusText}`, res.status);
   const json: any = await res.json();
   return (json.data ?? []).map((m: any) => m.id).filter(Boolean);

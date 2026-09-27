@@ -68,8 +68,8 @@ const api = {
   usage: (
     days: number,
   ): Promise<{
-    totals: { prompt: number; completion: number; turns: number; seconds: number };
-    byAgent: { id: string; name: string; prompt: number; completion: number; turns: number; seconds: number }[];
+    totals: { prompt: number; completion: number; turns: number; seconds: number; cost: number };
+    byAgent: { id: string; name: string; prompt: number; completion: number; turns: number; seconds: number; cost: number }[];
   }> => ipcRenderer.invoke('halo:usage', days),
 
   search: (
