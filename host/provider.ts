@@ -118,7 +118,7 @@ export function describeFailure(reason: FailureReason, message: string): string 
       // which is more use than a generic line about the model.
       return message || 'The model is not configured. Pick one in Settings → Model.';
     case 'network':
-      return 'The model server could not be reached.';
+      return 'The model server could not be reached — check it is running at the address in Settings → Model.';
     default:
       return `Model request failed: ${message}`;
   }

@@ -1080,7 +1080,9 @@ export class Runner implements RunnerPort {
     } catch (error) {
       const message = String((error as Error)?.message ?? error);
       const reason = error instanceof ProviderError ? error.reason : classifyProviderError(error);
-      const text = error instanceof ProviderError ? describeFailure(reason, message) : `Turn failed: ${message}`;
+      // A refused connection arrives as fetch's own TypeError, not a ProviderError, and "Turn failed:
+      // fetch failed" told the user nothing; any error that classifies gets the sentence that fixes it.
+      const text = error instanceof ProviderError || reason !== 'unknown' ? describeFailure(reason, message) : `Turn failed: ${message}`;
       this.emitEvent({ type: 'error', agentId, message: text });
       ctx.sendMessage(text);
       // The note is what a routine's run history shows, so it carries the code a person can act on.
