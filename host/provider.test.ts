@@ -70,6 +70,7 @@ test('the server kind is read off the address, and OpenRouter is told who is cal
   assert.equal(providerKind('http://localhost:1234/v1'), 'lmstudio');
   assert.equal(providerKind('https://api.openai.com/v1'), 'openai');
   const or = requestHeaders({ ...DEFAULT_SETTINGS.provider, baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'k' });
+  assert.equal(or['X-OpenRouter-Title'], 'Halo Bot');
   assert.equal(or['X-Title'], 'Halo Bot');
   assert.match(or['HTTP-Referer'] ?? '', /^https:\/\//);
   assert.equal(or.authorization, 'Bearer k');

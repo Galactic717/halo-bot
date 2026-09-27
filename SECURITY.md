@@ -86,6 +86,15 @@ Stated so nobody has to discover them:
 - **`ExternalShell` runs with the user's rights** once they approve it. That is its job.
 - **The trail is tamper-evident, not tamper-proof.** A process with the user's rights can rewrite
   it and recompute every hash; a bot's container cannot reach it at all.
+- **A call written in a reply's text is a call.** For small models and servers without tool
+  support, Halo parses tool calls out of the model's text (`host/provider.ts`,
+  `parseContentToolCalls`). Only names of real tools count, and every one goes through the same gate,
+  but a model talked into writing a call in prose gets it run exactly as if it had used `tool_calls`.
+  The gate, not the parser, is what stops a bad one.
+- **`UseTool` reaches every tool.** On the compact profile most tools are off the wire and one
+  `UseTool` away. That hides schemas from a small model; it is not a permission boundary, and it is
+  not meant to be one — the real tool is unwrapped and gated under its own name.
+- **Android is frozen at the 3 September runtime** and has none of the above.
 - **Android's box is the app's sandbox, shared by every bot.** It keeps bots out of the rest of the
   phone, but one bot's shell can read another bot's box and Halo's own data, and it has the app's
   network access. Per-bot isolation there is not built yet.

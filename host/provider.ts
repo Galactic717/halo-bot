@@ -199,7 +199,11 @@ export function requestHeaders(settings: Settings['provider']): Record<string, s
   return {
     'content-type': 'application/json',
     ...(settings.apiKey ? { authorization: `Bearer ${settings.apiKey}` } : {}),
-    ...(providerKind(settings.baseUrl) === 'openrouter' ? { 'HTTP-Referer': APP_URL, 'X-Title': 'Halo Bot' } : {}),
+    // OpenRouter's app attribution: the Referer is the identifier, the title is the display name.
+    // X-OpenRouter-Title is the current name; X-Title the one older docs and gateways still read.
+    ...(providerKind(settings.baseUrl) === 'openrouter'
+      ? { 'HTTP-Referer': APP_URL, 'X-OpenRouter-Title': 'Halo Bot', 'X-Title': 'Halo Bot' }
+      : {}),
   };
 }
 
@@ -499,11 +503,10 @@ async function chatOnce(
     messages: wireMessages(messages),
     stream: true,
   };
-  // Most OpenAI-compatible servers send a final usage chunk when asked; an older llama.cpp 400s.
+  // Most OpenAI-compatible servers send a final usage chunk when asked; an older llama.cpp 400s on it.
   if (!quirksOf(settings).noStreamOptions) body.stream_options = { include_usage: true };
   if (kind === 'openrouter') {
-    // Usage accounting puts the call's price in the last chunk; `models` is OpenRouter's own fallback.
-    body.usage = { include: true };
+    // Its last chunk always carries usage with `cost`; `models` is OpenRouter's own fallback list.
     const fallbacks = (settings.fallbackModels ?? []).map((m) => m.trim()).filter((m) => m && m !== settings.model);
     if (fallbacks.length) body.models = [settings.model, ...fallbacks];
   }
