@@ -464,7 +464,7 @@ export const MCP_CATALOG: McpServerSpec[] = [
     description: 'Read, write and search files in folders you choose, with the roots enforced.',
     category: 'MCP',
     featured: true,
-    setup: [{ key: 'root', label: 'Folder the server may use', placeholder: 'C:\Users\you\Documents' }],
+    setup: [{ key: 'root', label: 'Folder the server may use', placeholder: 'C:\\Users\\you\\Documents' }],
     ...npm('@modelcontextprotocol/server-filesystem'),
   },
 
