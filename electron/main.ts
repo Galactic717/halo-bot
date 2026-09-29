@@ -12,7 +12,7 @@ import { McpManager, type McpServerSpec } from '../host/mcp';
 import { startWebhookServer, type WebhookServer } from './webhook';
 import { MCP_CATALOG } from '../host/catalog';
 import { parseMcpConfig } from '../host/plugins';
-import { listModels, listModelsDetailed, rankModels } from '../host/provider';
+import { listModels, listModelsDetailed, rankModels, serverInfo } from '../host/provider';
 import { parseTrigger } from '../host/tools';
 import { verifyConfinement, type Confinement } from '../host/box';
 import type { Agent, ApprovalDecision, Channel, HaloEvent, Routine, Settings } from '../host/types';
@@ -433,6 +433,8 @@ function registerIpc() {
     }
   });
 
+  ipcMain.handle('halo:serverInfo', (_e, baseUrl: string) => serverInfo({ ...store.getSettings().provider, baseUrl }));
+
   ipcMain.handle('halo:settings.models', async () => {
     try {
       return await listModels(store.getSettings().provider);
@@ -662,14 +664,15 @@ function registerIpc() {
   ipcMain.handle('halo:usage', (_e, days: number) => {
     const since = Date.now() - Math.max(1, days) * 86_400_000;
     const rows = store.usage(since);
-    const byAgent = new Map<string, { name: string; prompt: number; completion: number; turns: number; seconds: number }>();
+    const byAgent = new Map<string, { name: string; prompt: number; completion: number; turns: number; seconds: number; cost: number }>();
     for (const row of rows) {
       const name = store.getAgent(row.agentId)?.name ?? 'Deleted bot';
-      const cur = byAgent.get(row.agentId) ?? { name, prompt: 0, completion: 0, turns: 0, seconds: 0 };
+      const cur = byAgent.get(row.agentId) ?? { name, prompt: 0, completion: 0, turns: 0, seconds: 0, cost: 0 };
       cur.prompt += row.promptTokens;
       cur.completion += row.completionTokens;
       cur.turns += 1;
       cur.seconds += row.seconds;
+      cur.cost += row.costUsd ?? 0;
       byAgent.set(row.agentId, cur);
     }
     return {
@@ -679,8 +682,9 @@ function registerIpc() {
           completion: acc.completion + row.completionTokens,
           turns: acc.turns + 1,
           seconds: acc.seconds + row.seconds,
+          cost: acc.cost + (row.costUsd ?? 0),
         }),
-        { prompt: 0, completion: 0, turns: 0, seconds: 0 },
+        { prompt: 0, completion: 0, turns: 0, seconds: 0, cost: 0 },
       ),
       byAgent: [...byAgent.entries()].map(([id, value]) => ({ id, ...value })).sort((a, b) => b.completion - a.completion),
     };

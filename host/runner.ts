@@ -4,12 +4,12 @@ import { extname } from 'node:path';
 import { MemoryStore, extractMemories } from './memory.ts';
 import { SkillStore } from './skills.ts';
 import { runShell } from './tools.ts';
-import { chat, classifyProviderError, describeFailure, providerFor, ProviderError, type ChatMessage, type ToolSchema } from './provider.ts';
-import { buildSystemPrompt, REPLY_REMINDER } from './prompt.ts';
+import { chat, classifyProviderError, describeFailure, isLocalKind, providerFor, providerKind, ProviderError, type ChatMessage, type ChatResult, type ToolSchema } from './provider.ts';
+import { buildCompactPrompt, buildSystemPrompt, REPLY_REMINDER } from './prompt.ts';
 import { decideDetailed, reviewWithModel, summarize, type Verdict } from './policy.ts';
 import { AuditLog } from './audit.ts';
 import { runAgUi, type AgUiMessage } from './agui.ts';
-import { TOOLS, TOOLS_BY_NAME, describeTriggers, type ComputerPort, type RunnerPort, type Tool, type ToolContext } from './tools.ts';
+import { CORE_TOOL_NAMES, FIND_TOOL, TOOLS, TOOLS_BY_NAME, USE_TOOL, describeTriggers, findTools, type ComputerPort, type RunnerPort, type Tool, type ToolContext } from './tools.ts';
 import type { SubagentKind, SubagentRun } from './subagents.ts';
 import { mentionedNames } from './mentions.ts';
 import { compactHistory, estimateTokens } from './compaction.ts';
@@ -465,10 +465,11 @@ export class Runner implements RunnerPort {
         this.store.recordUsage({
           at: Date.now(),
           agentId: parentAgentId,
-          model: provider.model,
+          model: result.model ?? provider.model,
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           seconds: Math.round((Date.now() - startedAt) / 100) / 10,
+          ...(result.usage.costUsd !== undefined ? { costUsd: result.usage.costUsd } : {}),
         });
         history.push({
           role: 'assistant',
@@ -625,8 +626,38 @@ export class Runner implements RunnerPort {
     this.emitEvent({ type: 'status', agentId, status, note });
   }
 
-  private toolSchemas(): ToolSchema[] {
-    const base = TOOLS.map((t) => t.schema);
+  /**
+   * Whether this bot runs on the compact profile. `auto` means a model on this machine gets it and a
+   * hosted one does not: the local server is where the window is small and every prompt token is
+   * paid for in seconds, and a hosted frontier model does better with the full prompt.
+   */
+  private compact(agent?: Agent | null): boolean {
+    const provider = this.store.getSettings().provider;
+    if (agent?.endpoint) return false;
+    if (provider.profile === 'compact') return true;
+    if (provider.profile === 'full') return false;
+    return isLocalKind(providerKind(provider.baseUrl));
+  }
+
+  /** Built-in tools that can do something right now. One that can only say "switched off" is a trap. */
+  private builtinSchemas(): ToolSchema[] {
+    const settings = this.store.getSettings();
+    return TOOLS.map((t) => t.schema).filter(
+      (t) => (settings.n8n?.enabled || !t.name.startsWith('N8n')) && (settings.provider.imageBaseUrl || t.name !== 'GenerateImage'),
+    );
+  }
+
+  /** Every tool a bot could call, built-in and plugin, whether or not it travels on the wire. */
+  private availableTools(): ToolSchema[] {
+    return [...this.builtinSchemas(), ...(this.mcp?.toolSchemas() ?? [])];
+  }
+
+  private toolSchemas(compact = false): ToolSchema[] {
+    if (compact) {
+      const core = new Set<string>(CORE_TOOL_NAMES);
+      return [...TOOLS.filter((t) => core.has(t.schema.name)).map((t) => t.schema), FIND_TOOL, USE_TOOL];
+    }
+    const base = this.builtinSchemas();
     const plugins = this.mcp?.toolSchemas() ?? [];
     // A handful of plugin tools is cheaper to carry than to look up. A shelf of them is not: past the
     // limit they turn into two meta-tools the bot calls on demand, which is what keeps the prompt
@@ -678,11 +709,12 @@ export class Runner implements RunnerPort {
   private systemPrompt(agent: Agent, channelId?: string): string {
     // Kept in step with the running version rather than with whatever version created the box.
     ensureReference(this.store.boxDir(agent.id));
+    const build = this.compact(agent) ? buildCompactPrompt : buildSystemPrompt;
     const routines = this.store
       .listRoutines()
       .filter((r) => r.agentId === agent.id)
       .map((r) => `${r.name} — ${describeTriggers(r.triggers)}${r.enabled ? '' : ' (disabled)'}`);
-    return buildSystemPrompt({
+    return build({
       agent,
       settings: this.store.getSettings(),
       boxDir: this.store.boxDir(agent.id),
@@ -770,6 +802,11 @@ export class Runner implements RunnerPort {
      * the user when even that did not land.
      */
     let workedThisTurn = false;
+    let talkOnlySteps = 0;
+    /** The clock, read once per turn so every step of it sends the same prefix. */
+    const turnTime = new Date().toLocaleString('en-GB', { timeZone: settings.timezone });
+    /** Whether anything but talking happened this turn; only then can talking be the end of it. */
+    let didWork = false;
     let nudgedForDelivery = false;
     let widgetSent = false;
     /** One compaction per turn: a second overflow means the tail alone does not fit, and looping would not help. */
@@ -788,6 +825,8 @@ export class Runner implements RunnerPort {
     let lastDelivered = '';
     /** How much of the request the server admitted it read, used to spot a truncating context window. */
     let lastPromptTokens = 0;
+    /** Roughly how much was sent, so a server that read far less than that can be named as the cause. */
+    let sentTokens = 0;
     const sentTexts = new Set<string>();
     const ctx: ToolContext = {
       agentId,
@@ -855,7 +894,7 @@ export class Runner implements RunnerPort {
         // call, so asking never costs an extra round trip or leaves tool_calls without results.
         if (widgetSent) break;
 
-        const messages: ChatMessage[] = withReplyReminder([
+        const messages: ChatMessage[] = withReplyReminder(turnTime, [
           { role: 'system', content: this.systemPrompt(agent, channelId) },
           ...this.history(historyId, historySuffix),
         ]);
@@ -863,6 +902,7 @@ export class Runner implements RunnerPort {
         let streamed = '';
         const startedAt = Date.now();
         const providerForAgent = providerFor(settings.provider, agent);
+        const wireTools = this.toolSchemas(this.compact(agent));
         const stream = (chunk: string) => {
           streamed += chunk;
           const a = ensureActivity();
@@ -872,7 +912,7 @@ export class Runner implements RunnerPort {
           this.emitEvent({ type: 'message.patch', agentId: target, messageId: a.id, text: streamed });
         };
 
-        let result;
+        let result: ChatResult;
         try {
           /*
            * A bot with an endpoint is somebody else's agent, on any framework, run through AG-UI.
@@ -881,7 +921,7 @@ export class Runner implements RunnerPort {
            */
           result = agent.endpoint
             ? await this.runRemote(agent, historyId, messages, stream, abort.signal)
-            : await chat(providerForAgent, messages, this.toolSchemas(), stream, abort.signal);
+            : await chat(providerForAgent, messages, wireTools, stream, abort.signal);
         } catch (error) {
           /*
            * The one failure worth a second attempt after changing something.
@@ -896,24 +936,26 @@ export class Runner implements RunnerPort {
           compactedForOverflow = true;
           this.systemEvent(agentId, { kind: 'note', label: 'Ran out of context — folding older turns into a summary and trying again' });
           await this.compactIfNeeded(historyId, historySuffix, agentId, abort.signal, true);
-          const retried: ChatMessage[] = withReplyReminder([
+          const retried: ChatMessage[] = withReplyReminder(turnTime, [
             { role: 'system', content: this.systemPrompt(agent, channelId) },
             ...this.history(historyId, historySuffix),
           ]);
           streamed = '';
           result = agent.endpoint
             ? await this.runRemote(agent, historyId, retried, stream, abort.signal)
-            : await chat(providerForAgent, retried, this.toolSchemas(), stream, abort.signal);
+            : await chat(providerForAgent, retried, wireTools, stream, abort.signal);
         }
 
         lastPromptTokens = result.usage.promptTokens;
+        sentTokens = estimateTokens(messages) + Math.ceil(JSON.stringify(wireTools).length / 4);
         this.store.recordUsage({
           at: Date.now(),
           agentId,
-          model: providerForAgent.model,
+          model: result.model ?? providerForAgent.model,
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           seconds: Math.round((Date.now() - startedAt) / 100) / 10,
+          ...(result.usage.costUsd !== undefined ? { costUsd: result.usage.costUsd } : {}),
         });
 
         if (result.text.trim()) {
@@ -992,6 +1034,16 @@ export class Runner implements RunnerPort {
             );
           }
         }
+
+        /*
+         * A small model that has delivered does not always know how to stop: it thanks the user,
+         * then summarises the summary, eight messages in a row (seen on Gemma 4 E4B). Two steps
+         * that did nothing but talk, after the work, is the turn being over.
+         */
+        const talkOnly = result.toolCalls.every((c) => c.name === 'SendMessage' || c.name === 'ReactToMessage');
+        if (!talkOnly) didWork = true;
+        talkOnlySteps = talkOnly && deliveredSomething ? talkOnlySteps + 1 : 0;
+        if (talkOnlySteps >= 2 && didWork) break;
       }
 
       /*
@@ -1019,7 +1071,7 @@ export class Runner implements RunnerPort {
          * the instructions it is being judged against — it answers in plain text, gets nudged, and
          * then produces nothing. Ollama ships a 4096-token default, which is below the floor here.
          */
-        const short = lastPromptTokens > 0 && lastPromptTokens < PROMPT_FLOOR_TOKENS;
+        const short = lastPromptTokens > 0 && sentTokens > 0 && lastPromptTokens < sentTokens * 0.6;
         this.systemEvent(agentId, {
           kind: 'note',
           label: short
@@ -1028,7 +1080,8 @@ export class Runner implements RunnerPort {
         });
       }
 
-      void this.rememberExchange(agentId, userText);
+      // Best effort, after the turn: a model that is down for this one call must not take the app with it.
+      void this.rememberExchange(agentId, userText).catch(() => {});
       log('info', 'turn.done', { agentId, ms: Date.now() - started, stopped: abort.signal.aborted, delivered: Boolean(lastDelivered) });
       if (abort.signal.aborted) return { ok: false, note: 'stopped' };
       return { ok: true, ...(lastDelivered ? { note: lastDelivered } : {}) };
@@ -1036,7 +1089,9 @@ export class Runner implements RunnerPort {
       const message = String((error as Error)?.message ?? error);
       const reason = error instanceof ProviderError ? error.reason : classifyProviderError(error);
       log('error', 'turn.failed', { agentId, ms: Date.now() - started, reason, error: error instanceof Error ? error : message });
-      const text = error instanceof ProviderError ? describeFailure(reason, message) : `Turn failed: ${message}`;
+      // A refused connection arrives as fetch's own TypeError, not a ProviderError, and "Turn failed:
+      // fetch failed" told the user nothing; any error that classifies gets the sentence that fixes it.
+      const text = error instanceof ProviderError || reason !== 'unknown' ? describeFailure(reason, message) : `Turn failed: ${message}`;
       this.emitEvent({ type: 'error', agentId, message: text });
       ctx.sendMessage(text);
       // The note is what a routine's run history shows, so it carries the code a person can act on.
@@ -1079,13 +1134,23 @@ export class Runner implements RunnerPort {
       onNote?.(message);
     }
 
+    /*
+     * A box command runs in the bot's own AppContainer or not at all (runShell fails closed), so the
+     * kernel is its boundary. With the box offline the worst it can do is to the bot's own box, and a
+     * model asked to second-guess `cat total.txt` — a 4B helper, on a small setup — mostly raised false
+     * alarms that stalled unattended work (scripts/job.mts: eight in one run). With network on, a box
+     * command could carry out what the bot read, so it is still reviewed.
+     */
+    const offlineBox = tool.surface === 'shell' && !this.store.getAgent(agentId)?.boxNetwork;
+
     // Smart mode asks the model about anything the local rules would wave through.
     if (
       verdict.decision === 'allow' &&
       verdict.source !== 'granted' &&
       settings.autoReview &&
       settings.autoReviewMode === 'smart' &&
-      REVIEWED_SURFACES.has(tool.surface)
+      REVIEWED_SURFACES.has(tool.surface) &&
+      !offlineBox
     ) {
       const review = await reviewWithModel(settings, tool.surface, action, signal);
       if (review.decision !== 'allow') {
@@ -1175,6 +1240,29 @@ export class Runner implements RunnerPort {
       this.emitEvent({ type: 'tool', agentId: transcriptId, messageId: activity.id, call: { ...record } });
     };
     attach({});
+
+    if (!tool && call.name === 'FindTool') {
+      const onWire = new Set(this.toolSchemas(true).map((t) => t.name));
+      const output = findTools(String(call.args.query ?? ''), this.availableTools().filter((t) => !onWire.has(t.name)));
+      attach({ status: 'done', endedAt: Date.now(), result: output.slice(0, 4000) });
+      return { output };
+    }
+    if (!tool && call.name === 'UseTool') {
+      // Unwrapped here, so the real tool meets the gate, the trail and the fence under its own name.
+      const name = typeof call.args.name === 'string' ? call.args.name.trim() : '';
+      const raw = call.args.args ?? call.args.arguments ?? {};
+      let args: Record<string, unknown> = {};
+      if (typeof raw === 'string') {
+        try { args = JSON.parse(raw) as Record<string, unknown>; } catch { args = {}; }
+      } else if (raw && typeof raw === 'object') args = raw as Record<string, unknown>;
+      if (!name || name === 'UseTool' || name === 'FindTool' || !(TOOLS_BY_NAME.has(name) || this.mcp?.isPluginTool(name))) {
+        const output = `${name || '(no name)'} is not a tool. Call FindTool and use a name from its answer.`;
+        attach({ status: 'error', endedAt: Date.now(), error: output });
+        return { output };
+      }
+      attach({ status: 'done', endedAt: Date.now(), result: `→ ${name}` });
+      return this.executeTool(ctx, ensureActivity, { ...call, id: `${call.id}:${name}`, name, args }, transcriptId);
+    }
 
     if (!tool) {
       // The two meta-tools that stand in for inlined plugin schemas. Listing is read-only; calling is
@@ -1393,13 +1481,6 @@ export function commandPrefixOf(command: string): string {
   return (takesSecond ? `${head} ${second}` : head).toLowerCase();
 }
 
-/**
- * Below this, a prompt cannot have carried Halo's instructions and its toolset.
- *
- * The system prompt is ~1500 tokens and the 41 tool schemas are a few thousand more, so a server
- * that reports having read fewer than this truncated the request rather than answered it.
- */
-const PROMPT_FLOOR_TOKENS = 4200;
 
 const MAX_CHANNEL_HOPS = 3;
 
@@ -1420,12 +1501,19 @@ function parseConversationKey(key: string): { agentId: string; channelId?: strin
  * Puts the "your text is not delivered" nudge on the last user message of the request.
  * It rides along with the call rather than being stored, so it is never re-sent from history.
  */
-function withReplyReminder(messages: ChatMessage[]): ChatMessage[] {
+/**
+ * The reminder, and the time the turn started, on the user's message rather than in the system prompt.
+ *
+ * A local server reuses what it already read only up to the first token that differs, and the system
+ * prompt is the first thing in every request: a clock there made llama.cpp re-read the whole history on
+ * every step — 90 seconds a step for Gemma 4 26B with its experts on the CPU. Here it changes once a turn.
+ */
+function withReplyReminder(time: string, messages: ChatMessage[]): ChatMessage[] {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
     if (message.role !== 'user') continue;
     const patched = [...messages];
-    patched[i] = { ...message, content: `${message.content}\n\n${REPLY_REMINDER}` };
+    patched[i] = { ...message, content: `${message.content}\n\n${REPLY_REMINDER}\nLocal time when this turn started: ${time}.` };
     return patched;
   }
   return messages;

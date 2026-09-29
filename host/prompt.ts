@@ -1,5 +1,5 @@
 import { hostname, userInfo } from 'node:os';
-import { fenceRules } from './fence.ts';
+import { fenceRules, fenceRulesShort } from './fence.ts';
 import { languageSection, personaSection } from './personas.ts';
 import { REFERENCE_DIR, referenceFiles } from './reference.ts';
 import type { Agent, Settings } from './types.ts';
@@ -23,7 +23,10 @@ export interface PromptInput {
 
 export function buildSystemPrompt(input: PromptInput): string {
   const { agent, settings, boxDir, memory, teammates, routines, skills, channels, channel } = input;
-  const now = new Date().toLocaleString('en-GB', { timeZone: settings.timezone });
+  // The date, not the time: the system prompt is the front of every request, and a clock that ticks
+  // inside it made a local server re-read the whole conversation on every step (the exact time rides
+  // at the end of the request instead — see withReplyReminder in runner.ts).
+  const now = new Date().toLocaleDateString('en-GB', { timeZone: settings.timezone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
   const profile = [
     agent.title ? `Your role: ${agent.title}.` : '',
@@ -198,6 +201,60 @@ CallPluginTool instead. List first so you use a real name and real arguments, th
 or nonsensical, list again before retrying — a plugin can be restarted under you and its arguments renamed.
 
 # Environment
-Windows, PowerShell. Machine ${hostname()}, user ${userInfo().username}. Local time ${now} (${settings.timezone}).
+Windows, PowerShell. Machine ${hostname()}, user ${userInfo().username}. Today is ${now} (${settings.timezone}).
 Approvals are ${settings.autoReview ? 'on' : 'off'}; execution on the user's computer is set to "${settings.localExecution}".`;
+}
+
+/**
+ * The system prompt for a small model: the same contract as the long one, stated as rules instead
+ * of explained. Around 900 tokens before memory, against ~3k for the full prompt — what matters to a
+ * 4B model is that the six things it must never get wrong are near the top and in plain words.
+ * Nothing that keeps the user safe is dropped: the fence, the approval stop and the refusal rule are
+ * all here, and the gate enforces them whatever the prompt says.
+ */
+export function buildCompactPrompt(input: PromptInput): string {
+  const { agent, settings, boxDir, memory, teammates, routines, channel } = input;
+  // The date, not the time: the system prompt is the front of every request, and a clock that ticks
+  // inside it made a local server re-read the whole conversation on every step (the exact time rides
+  // at the end of the request instead — see withReplyReminder in runner.ts).
+  const now = new Date().toLocaleDateString('en-GB', { timeZone: settings.timezone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const mates = teammates.filter((t) => t.id !== agent.id).slice(0, 20).map((t) => `${t.name}${t.title ? ` (${t.title})` : ''}`);
+  return `You are ${agent.name}, an AI teammate inside Halo Bot on the user's Windows PC.${agent.title ? ` Role: ${agent.title}.` : ''}${agent.description ? ` ${agent.description}` : ''}
+You do the work yourself with tools, then report. Never describe a tool call — make it.
+
+# Rules
+1. The user sees ONLY what you pass to SendMessage. Text outside a tool call is thrown away.
+2. Act first. Pick sensible defaults and say what you assumed. Use AskUser only before an irreversible
+   step, or for something only the user knows.
+3. Your box is ${boxDir}. Shell, Read, Write, Edit and ListFiles work there without approval. Use paths
+   relative to it. Shell is PowerShell.
+4. Anything outside the box, and anything that sends, deletes or spends, waits for the user's approval.
+   A refusal is final: report what was blocked and why. Never reach the same result another way.
+5. Browser: take a snapshot first, then act by the ref it gave you. If the user takes over, stop and wait.
+6. Use exactly the file names and folders the user gave. Check your work — read the file back, look
+   at the output — before you say it is done.
+7. End with one short SendMessage that states the result itself — the numbers, names, changes or
+   answer — then where it is saved and what needs the user. "Saved to a file" alone is not a report.
+8. More tools exist: routines, teammates, skills, plugins, the user's own computer, subagents, images.
+   FindTool("what you need") lists them and their arguments; UseTool calls one.
+${agent.allowedPaths?.length ? `Folders the user already granted you: ${agent.allowedPaths.join(', ')}
+` : ''}
+${fenceRulesShort()}
+
+${languageSection(settings.replyLanguage)}
+${personaSection(agent.personaId, agent.persona)}
+
+# Memory
+${memory.trim() || '(empty)'}
+${mates.length ? `
+# Teammates (message them with SendToAgent via UseTool)
+${mates.join(', ')}
+` : ''}${routines.length ? `
+# Your routines
+${routines.join('\n')}
+` : ''}${channel ? `
+# Room
+You are in the "${channel.name}" room with ${channel.members.join(', ')} and the user. Everyone sees what you send. Answer only what is yours; @Name only when that teammate must act.
+` : ''}
+Machine ${hostname()}. Today is ${now} (${settings.timezone}).`;
 }

@@ -642,10 +642,63 @@ fn box_location(box_dir: &str, cwd: &str) -> String {
         .trim_start_matches('\\');
     let quote = |s: &str| s.replace('\'', "''");
     format!(
-        "Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Management\", \"$PSHOME\\Modules\\Microsoft.PowerShell.Utility\"; $null = New-PSDrive -Name Box -PSProvider FileSystem -Root '{}'; Set-Location -LiteralPath 'Box:\\{}';",
+        "Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Management\", \"$PSHOME\\Modules\\Microsoft.PowerShell.Utility\"; $null = New-PSDrive -Name Box -PSProvider FileSystem -Root '{}'; Set-Location -LiteralPath 'Box:\\{}'; {} {}",
         quote(root),
-        quote(inside)
+        quote(inside),
+        UTF8,
+        NATIVE_PATHS
     )
+}
+
+/// Windows PowerShell 5.1's text defaults, made UTF-8 and culture-neutral.
+///
+/// Out of the box `>` writes UTF-16, Set-Content writes the ANSI code page (so Cyrillic becomes `?`),
+/// Export-Csv puts a `#TYPE` line on top, and stdout goes out in the OEM code page, which Halo then
+/// reads as UTF-8. A small model writing names.txt with `>` produced a file every other tool read as
+/// binary. UTF-8 here still carries a BOM — 5.1 has no way to write without one from these cmdlets.
+/// The culture is invariant because what a box writes is data: on a Ukrainian Windows 9.5 went into a
+/// CSV as "9,5". The bot talks to the user through SendMessage, not through PowerShell's formatting.
+const UTF8: &str = "[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; $PSDefaultParameterValues = @{ 'Out-File:Encoding' = 'utf8'; 'Set-Content:Encoding' = 'utf8'; 'Add-Content:Encoding' = 'utf8'; 'Export-Csv:Encoding' = 'utf8'; 'Export-Csv:NoTypeInformation' = $true };";
+
+/// Remove-Item, Move-Item and Rename-Item, taking native paths.
+///
+/// Given a path on the Box: drive, PowerShell's file system provider fixes up the path's casing by
+/// walking every folder above it, and the container may not look at any of those — so deleting,
+/// moving or renaming a file in the box failed with "Access is denied" while writing it worked.
+/// The kernel was never the problem: the same operations with a native -LiteralPath succeed. These
+/// stand-ins resolve each path (wildcards included) to a native one and call the real cmdlet with it;
+/// aliases such as rm, del, mv and ren find them first because a function outranks a cmdlet.
+const NATIVE_PATHS: &str = r#"function global:__HaloPaths([string[]]$Paths) { foreach ($p in $Paths) { if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($p)) { Resolve-Path -Path $p -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath } } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p) } } }
+function global:__HaloCall([string]$Name, $Bound) { $b = @{}; foreach ($k in $Bound.Keys) { $b[$k] = $Bound[$k] }; $paths = __HaloPaths $b['Path']; $null = $b.Remove('Path'); if ($Name -eq 'Move-Item' -and -not $b.ContainsKey('Destination')) { $b['Destination'] = '.' }; if ($b.ContainsKey('Destination')) { $b['Destination'] = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($b['Destination']) }; foreach ($n in $paths) { & "Microsoft.PowerShell.Management\$Name" -LiteralPath $n @b } }
+function global:Remove-Item { [CmdletBinding()] param([Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)][Alias('PSPath','LiteralPath')][string[]]$Path, [switch]$Recurse, [switch]$Force, [string[]]$Include, [string[]]$Exclude, [string]$Filter) process { __HaloCall Remove-Item $PSBoundParameters } }
+function global:Move-Item { [CmdletBinding()] param([Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)][Alias('PSPath','LiteralPath')][string[]]$Path, [Parameter(Position=1)][string]$Destination, [switch]$Force, [switch]$PassThru, [string[]]$Include, [string[]]$Exclude, [string]$Filter) process { __HaloCall Move-Item $PSBoundParameters } }
+function global:Rename-Item { [CmdletBinding()] param([Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)][Alias('PSPath','LiteralPath')][string[]]$Path, [Parameter(Mandatory, Position=1)][string]$NewName, [switch]$Force, [switch]$PassThru) process { __HaloCall Rename-Item $PSBoundParameters } }
+"#;
+
+/// One argument, quoted the way the C runtime (and so powershell.exe) splits a command line:
+/// quotes escaped with a backslash, and backslashes doubled only where they precede a quote.
+fn quote_arg(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut slashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat('\\').take(slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat('\\').take(slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat('\\').take(slashes * 2));
+    out.push('"');
+    out
 }
 
 struct Args {
@@ -804,11 +857,24 @@ fn main() {
         let shell = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
         // -NoProfile matters twice: speed, and a profile script is a place somebody could put
         // something that runs before every command the boundary was built to contain.
-        let mut command_line = wide(&format!(
-            "\"{shell}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {} {}",
-            box_location(&args.box_dir, &args.cwd),
-            args.command
-        ));
+        //
+        // One quoted argument. Appended raw, the bot's text went through powershell.exe's own
+        // argument splitting first, which ate every double quote: `Write-Output "a b"` ran as
+        // `Write-Output a b`, and a small model's JSON handling failed for reasons it could not see.
+        // (-EncodedCommand would dodge the quoting too, but then errors come back as CLIXML.)
+        let script = format!("{} {}", box_location(&args.box_dir, &args.cwd), args.command);
+        let line = format!(
+            "\"{shell}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {}",
+            quote_arg(&script)
+        );
+        if line.len() >= 32_000 {
+            eprintln!(
+                "halo-box: this command is too long for one Shell call ({} characters). Write the script to a .ps1 file in the box and run that.",
+                args.command.len()
+            );
+            exit(2);
+        }
+        let mut command_line = wide(&line);
         let application = wide(&shell);
         let cwd = wide(&args.cwd);
 

@@ -12,17 +12,23 @@ interface Candidate {
   label: string;
   baseUrl: string;
   models: string[];
+  /** What the server said about itself, when it says anything (llama.cpp does). */
+  info?: { contextWindow?: number; nativeTools?: boolean };
 }
 
+// llama.cpp first: it is the one tested end to end on this build (Gemma 4 E4B, scripts/job.mts).
 const KNOWN = [
+  { label: 'llama.cpp', baseUrl: 'http://localhost:8080/v1', apiKey: '' },
   { label: 'Ollama', baseUrl: 'http://localhost:11434/v1', apiKey: 'ollama' },
   { label: 'LM Studio', baseUrl: 'http://localhost:1234/v1', apiKey: 'lm-studio' },
-  { label: 'llama.cpp', baseUrl: 'http://localhost:8080/v1', apiKey: '' },
 ];
 
+/** Below this a local server cannot hold even the compact prompt plus a few tool results. */
+const MIN_WINDOW = 8192;
+
 const CLOUD = [
+  { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', hint: 'google/gemma-4-26b-a4b-it:free' },
   { label: 'x.ai', baseUrl: 'https://api.x.ai/v1', hint: 'grok-4' },
-  { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', hint: 'anthropic/claude-sonnet-4' },
   { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', hint: 'gpt-4.1' },
   { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', hint: 'deepseek-chat' },
 ];
@@ -41,7 +47,10 @@ export function Setup({ settings, onSave, onDone }: SetupProps) {
     const hits: Candidate[] = [];
     for (const server of KNOWN) {
       const models = await window.halo.probeProvider(server.baseUrl, server.apiKey);
-      if (Array.isArray(models) && models.length > 0) hits.push({ label: server.label, baseUrl: server.baseUrl, models });
+      if (Array.isArray(models) && models.length > 0) {
+        const info = await window.halo.serverInfo(server.baseUrl).catch(() => undefined);
+        hits.push({ label: server.label, baseUrl: server.baseUrl, models, ...(info ? { info } : {}) });
+      }
     }
     setFound(hits);
     setScanning(false);
@@ -79,8 +88,9 @@ export function Setup({ settings, onSave, onDone }: SetupProps) {
       <div className="setup__card">
         <h1>Set up Halo Bot</h1>
         <p className="setup__lead">
-          Halo runs your bots against any OpenAI-compatible model. Point it at something local, or paste a key for a
-          hosted one. You can change this later in Settings.
+          Halo runs your bots on a model on this machine (llama.cpp, Ollama, LM Studio) or on a hosted OpenAI-compatible
+          API — OpenRouter is the tested one. Small local models get a compact toolset and a short prompt so they can
+          still act. You can change this later in Settings.
         </p>
 
         <div className="section-header">
@@ -93,7 +103,8 @@ export function Setup({ settings, onSave, onDone }: SetupProps) {
         {scanning && <p className="empty-note">Looking for a local model server…</p>}
         {!scanning && found.length === 0 && (
           <p className="empty-note">
-            Nothing local found. Start Ollama or LM Studio and rescan, or use a hosted model below.
+            Nothing local found. Start llama-server with --jinja (or Ollama, or LM Studio) and rescan, or use a hosted
+            model below.
           </p>
         )}
 
@@ -104,7 +115,16 @@ export function Setup({ settings, onSave, onDone }: SetupProps) {
                 <div>
                   {candidate.label} <span className="setting-row__desc">· {candidate.models.length} models</span>
                 </div>
-                <div className="setting-row__desc">{candidate.baseUrl}</div>
+                <div className="setting-row__desc">
+                  {candidate.baseUrl}
+                  {candidate.info?.contextWindow ? ` · ${candidate.info.contextWindow}-token window` : ''}
+                  {candidate.info?.nativeTools === false ? ' · no tool template, calls go through the text protocol' : ''}
+                </div>
+                {candidate.info?.contextWindow !== undefined && candidate.info.contextWindow < MIN_WINDOW && (
+                  <div className="setting-row__desc" style={{ color: 'var(--text-danger)' }}>
+                    A {candidate.info.contextWindow}-token window is too small for a bot. Restart the server with -c 16384.
+                  </div>
+                )}
               </div>
               <select
                 className="input"

@@ -920,6 +920,18 @@ test('a deleted bot leaves nothing behind that can bring it back', () => {
   assert.equal(existsSync(store.agentDir(agent.id)), false);
 });
 
+test('memory extracted after a turn does not bring a deleted bot back, or crash on its missing folder', () => {
+  // Found by scripts/job.mts: extraction finishes after the turn, and the bot was deleted meanwhile.
+  const root = mkdtempSync(join(tmpdir(), 'halo-del-mem-'));
+  const store = new Store(root);
+  const agent = store.createAgent({ name: 'Scout' });
+  const memory = new MemoryStore(store, agent.id);
+  store.deleteAgent(agent.id);
+  memory.add('log', 'likes short replies');
+  memory.add('profile', 'name is Olena');
+  assert.equal(existsSync(store.agentDir(agent.id)), false);
+});
+
 test('a routine cannot be talked into firing every minute, and a room only holds so many', () => {
   // OpenBot's floor, for OpenBot's reason: a model can be talked into anything a sentence can
   // describe, and the floor is what a sentence cannot talk its way past.

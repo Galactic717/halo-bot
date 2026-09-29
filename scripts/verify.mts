@@ -18,7 +18,7 @@
  * Everything runs in a temp directory and nothing touches the real %APPDATA%/Halo Bot.
  */
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../host/store.ts';
@@ -27,6 +27,8 @@ import { AuditLog } from '../host/audit.ts';
 import { FENCE_TAG } from '../host/fence.ts';
 import type { ComputerPort } from '../host/tools.ts';
 import type { AuditRow, HaloEvent } from '../host/types.ts';
+import { resetQuirks } from '../host/provider.ts';
+import { CASES, fixturePage, type World } from '../evals/tasks.mts';
 
 // ---------------------------------------------------------------- the model
 
@@ -35,9 +37,17 @@ interface ScriptedTurn {
   calls?: { name: string; args: Record<string, unknown> }[];
 }
 
-/** One scripted assistant turn per request, in order; anything past the end is a bare stop. */
-function startModel(script: ScriptedTurn[]): Promise<{ port: number; server: Server; seen: () => number }> {
+/**
+ * One scripted assistant turn per request, in order; anything past the end is a bare stop.
+ * `rejectTools` plays a server that 400s on the `tools` field, the way Ollama does for a model
+ * without tool support; `bodies` keeps every streamed request so a check can read what was sent.
+ */
+function startModel(
+  script: ScriptedTurn[],
+  opts: { rejectTools?: boolean } = {},
+): Promise<{ port: number; server: Server; seen: () => number; bodies: Record<string, unknown>[] }> {
   let at = 0;
+  const bodies: Record<string, unknown>[] = [];
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
       if (req.url?.endsWith('/models')) {
@@ -64,6 +74,13 @@ function startModel(script: ScriptedTurn[]): Promise<{ port: number; server: Ser
           res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: answer } }] }));
           return;
         }
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+        if (opts.rejectTools && parsed.tools) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end('{"error":{"message":"this model does not support tools"}}');
+          return;
+        }
+        bodies.push(parsed);
         const turn = script[at++] ?? {};
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         const send = (delta: Record<string, unknown>) =>
@@ -92,7 +109,7 @@ function startModel(script: ScriptedTurn[]): Promise<{ port: number; server: Ser
       });
     });
     server.listen(0, '127.0.0.1', () =>
-      resolve({ port: (server.address() as { port: number }).port, server, seen: () => at }),
+      resolve({ port: (server.address() as { port: number }).port, server, seen: () => at, bodies }),
     );
   });
 }
@@ -294,6 +311,7 @@ async function main() {
 
   model.server.close();
   worker.server.close();
+  await realJob();
   store.flush();
   // Every bot made here, deleted the way the app deletes one — which also removes its box's
   // AppContainer profile rather than leaving one behind per run.
@@ -309,6 +327,149 @@ async function main() {
   }
   console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) failed.`}`);
   process.exit(failures === 0 ? 0 : 1);
+}
+
+// ------------------------------------------------------------------ a real job
+
+/** The page-watch job from evals/tasks.mts, done by a scripted model, judged by the same check. */
+const CHANGES = '# What changed\n- Pro: $29 -> $35 per month\n- New plan: Team, $59 per month, 10 seats\n- Free trial: 14 -> 7 days\n';
+const REVIEW = '- Pro price up to $35 — ACT\n- Team plan added — KEEP\n- Trial cut to 7 days — ACT\n';
+const TODAY = '# Plans\n- Starter: $9\n- Pro: $35\n- Team: $59\n- Business: $99\nFree trial: 7 days.\n';
+
+function startSite(): Promise<{ base: string; hits: string[]; server: Server }> {
+  const hits: string[] = [];
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => {
+      const path = (req.url ?? '/').split('?')[0]!;
+      const page = fixturePage(path);
+      if (!page) return void res.writeHead(404).end();
+      hits.push(path);
+      res.writeHead(200, { 'content-type': page.type }).end(page.body);
+    });
+    server.listen(0, '127.0.0.1', () => resolve({ base: `http://127.0.0.1:${(server.address() as { port: number }).port}`, hits, server }));
+  });
+}
+
+async function runJob(label: string, script: ScriptedTurn[], rejectTools: boolean, site: { base: string; hits: string[] }) {
+  const root = mkdtempSync(join(tmpdir(), 'halo-verify-job-'));
+  const model = await startModel(script, { rejectTools });
+  const store = new Store(root);
+  // Loopback reads as a server on this machine, so this is the compact profile a local model gets.
+  store.saveSettings({
+    provider: { ...store.getSettings().provider, baseUrl: `http://127.0.0.1:${model.port}/v1`, model: 'scripted', apiKey: '', maxSteps: 10 },
+  });
+  const agent = store.createAgent({ name: 'Scout' });
+  const box = store.boxDir(agent.id);
+  const job = CASES.find((c) => c.id === 'page-watch')!;
+  for (const [path, body] of Object.entries(job.files ?? {})) {
+    mkdirSync(join(box, path, '..'), { recursive: true });
+    writeFileSync(join(box, path), body);
+  }
+  const events: HaloEvent[] = [];
+  const runner = new Runner({
+    store,
+    computer: stubComputer(),
+    emit: (event) => {
+      events.push(event);
+      if (event.type === 'approval') runner.resolveApproval(event.approval.id, 'once');
+    },
+  });
+  site.hits.length = 0;
+  runner.submitUserMessage(agent.id, typeof job.prompt === 'function' ? job.prompt(site.base) : job.prompt);
+  await settle(runner, agent.id, 20_000);
+
+  const history = llmLines(root, agent.id) as { role: string; name?: string; content?: string; tool_calls?: { function: { name: string; arguments: string } }[] }[];
+  const world: World = {
+    replies: store
+      .transcript(agent.id)
+      .filter((m) => m.role === 'agent')
+      .map((m) => m.text)
+      .join('\n'),
+    boxFile: (path) => (existsSync(join(box, path)) ? readFileSync(join(box, path), 'utf8') : null),
+    calls: history
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.tool_calls ?? [])
+      .map((c) => ({ name: c.function.name, args: JSON.parse(c.function.arguments || '{}') as Record<string, unknown> })),
+    hits: [...site.hits],
+  };
+  check(
+    job.done(world),
+    `${label}: the page-watch job is done — page opened, changes, review list, snapshot, report`,
+    JSON.stringify({ hits: world.hits, replies: world.replies.slice(0, 80) }),
+  );
+  const fetched = history.find((l) => l.role === 'tool' && l.name === 'WebFetch');
+  check(Boolean(fetched?.content?.includes(FENCE_TAG)), `${label}: the page reached the model fenced`);
+  model.server.close();
+  store.flush();
+  for (const made of store.listAgents()) store.deleteAgent(made.id);
+  rmSync(root, { recursive: true, force: true });
+  return { bodies: model.bodies, events };
+}
+
+async function realJob() {
+  const site = await startSite();
+  const url = `${site.base}/pricing`;
+
+  console.log('\nA real job, native tool calls');
+  const native = await runJob(
+    'native',
+    [
+      { calls: [{ name: 'WebFetch', args: { url } }, { name: 'Read', args: { path: 'watch/pricing.md' } }] },
+      {
+        calls: [
+          { name: 'Write', args: { path: 'watch/changes.md', content: CHANGES } },
+          { name: 'Write', args: { path: 'watch/review.md', content: REVIEW } },
+          { name: 'Write', args: { path: 'watch/pricing.md', content: TODAY } },
+        ],
+      },
+      { calls: [{ name: 'SendMessage', args: { text: 'Pro went to $35, a Team plan appeared, the trial is 7 days now. Review list is in watch/review.md.' } }] },
+    ],
+    false,
+    site,
+  );
+  const wire = ((native.bodies[0]?.tools as { function: { name: string } }[] | undefined) ?? []).map((t) => t.function.name);
+  check(
+    wire.length > 0 && wire.length <= 14 && wire.includes('FindTool') && wire.includes('UseTool'),
+    'a local model gets the compact catalog, not forty schemas',
+    wire.join(' '),
+  );
+  const system = ((native.bodies[0]?.messages as { role: string; content: string }[] | undefined) ?? [])[0]?.content ?? '';
+  check(system.length < 7000 && system.includes(FENCE_TAG), 'and the short prompt, fence rules included', `${system.length} chars`);
+  const systems = native.bodies.map((b) => ((b.messages as { content: string }[] | undefined) ?? [])[0]?.content);
+  check(systems.length > 1 && systems.every((x) => x === systems[0]), 'the system prompt is identical on every step, so a local server reuses what it already read');
+
+  console.log('\nThe same job on a server that refuses the tools field');
+  resetQuirks();
+  const block = (tool: string, args: Record<string, unknown>) => '```json\n' + JSON.stringify({ tool, args }) + '\n```';
+  const content = await runJob(
+    'content',
+    [
+      { text: `Checking the page.\n${block('WebFetch', { url })}\n${block('Read', { path: 'watch/pricing.md' })}` },
+      {
+        text: [
+          block('Write', { path: 'watch/changes.md', content: CHANGES }),
+          block('Write', { path: 'watch/review.md', content: REVIEW }),
+          block('Write', { path: 'watch/pricing.md', content: TODAY }),
+        ].join('\n'),
+      },
+      // Reached through UseTool: the real tool must still meet the gate under its own name.
+      { text: block('UseTool', { name: 'ExternalShell', args: { command: 'git status', cwd: 'C:/' } }) },
+      { text: block('SendMessage', { text: 'Pro went to $35, a Team plan appeared, the trial is 7 days now.' }) },
+    ],
+    true,
+    site,
+  );
+  check(content.bodies.length > 0 && content.bodies.every((b) => b.tools === undefined), 'after one refusal every request goes out without the tools field');
+  check(
+    content.bodies.every((b) => (b.messages as { role: string }[]).every((m) => m.role !== 'tool')),
+    'and without tool roles, which such a server cannot render',
+  );
+  check(
+    content.events.some((e) => e.type === 'approval' && e.approval.surface === 'external_shell'),
+    'a tool reached through UseTool still stops at the approval gate',
+  );
+  resetQuirks();
+  site.server.close();
 }
 
 void main();

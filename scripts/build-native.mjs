@@ -18,7 +18,7 @@ function giveUp(message) {
     console.error(`[native] ${message}`);
     process.exit(1);
   }
-  console.warn(`[native] ${message} — a bot's shell will run unconfined`);
+  console.warn(`[native] ${message} — bot shells will be switched off until the helper is built`);
   process.exit(0);
 }
 

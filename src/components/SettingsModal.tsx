@@ -327,7 +327,8 @@ function Model({ settings, onSave }: { settings: Settings; onSave: SettingsModal
     <>
       <h2>Model</h2>
       <div className="setting-row__desc" style={{ marginBottom: 16 }}>
-        Any OpenAI-compatible endpoint works: Ollama, LM Studio, x.ai, OpenRouter, DeepSeek. The model needs tool calling.
+        Any OpenAI-compatible endpoint: llama.cpp, Ollama, LM Studio, OpenRouter, x.ai, DeepSeek. Tested end to end on
+        llama.cpp (Gemma 4 E4B) and OpenRouter.
       </div>
 
       <div className="field">
@@ -359,6 +360,36 @@ function Model({ settings, onSave }: { settings: Settings; onSave: SettingsModal
         {models.length > 0 && <div className="setting-row__desc">{models.length} models available</div>}
         {error && <div className="setting-row__desc" style={{ color: 'var(--text-danger)' }}>{error}</div>}
       </div>
+      <div className="field">
+        <label>Profile</label>
+        <select className="input" value={provider.profile} onChange={(e) => commit({ profile: e.target.value as Settings['provider']['profile'] })}>
+          <option value="auto">Auto — compact for a model on this machine, full for a hosted one</option>
+          <option value="compact">Compact — core tools, FindTool for the rest, short prompt</option>
+          <option value="full">Full — every tool and the long prompt</option>
+        </select>
+        <div className="setting-row__desc">A ~4B model acts reliably only on the compact profile.</div>
+      </div>
+      <div className="field">
+        <label>Tool calls</label>
+        <select className="input" value={provider.toolMode} onChange={(e) => commit({ toolMode: e.target.value as Settings['provider']['toolMode'] })}>
+          <option value="native">Native — the server's tool calling, with calls written as text picked up too</option>
+          <option value="content">Text protocol — tools described in the prompt, calls parsed from the reply</option>
+        </select>
+        <div className="setting-row__desc">A server that rejects tools is switched to the text protocol on its own.</div>
+      </div>
+      {provider.baseUrl.includes('openrouter.ai') && (
+        <div className="field">
+          <label>Fallback models</label>
+          <input
+            className="input"
+            value={(provider.fallbackModels ?? []).join(', ')}
+            placeholder="nvidia/nemotron-3-super-120b-a12b:free"
+            onChange={(e) => setProvider({ ...provider, fallbackModels: e.target.value.split(',').map((m) => m.trim()).filter(Boolean) })}
+            onBlur={() => commit({})}
+          />
+          <div className="setting-row__desc">Tried in order when the main model is rate limited or failing — free models often are. Usage shows which one answered.</div>
+        </div>
+      )}
       <div className="field">
         <label>Helper model</label>
         <input
@@ -562,8 +593,8 @@ function HiddenBots() {
 function Usage() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState<{
-    totals: { prompt: number; completion: number; turns: number; seconds: number };
-    byAgent: { id: string; name: string; prompt: number; completion: number; turns: number; seconds: number }[];
+    totals: { prompt: number; completion: number; turns: number; seconds: number; cost: number };
+    byAgent: { id: string; name: string; prompt: number; completion: number; turns: number; seconds: number; cost: number }[];
   } | null>(null);
 
   useEffect(() => {
@@ -577,7 +608,7 @@ function Usage() {
       <h2>Usage</h2>
       <div className="setting-row__desc" style={{ marginTop: -12, marginBottom: 16 }}>
         Counted from what your model server reports. Local models cost nothing but time — the seconds column is the one
-        that matters there.
+        that matters there. Cost is shown only where the server reports it (OpenRouter does).
       </div>
 
       <div className="tabs" style={{ width: 'fit-content', marginBottom: 16 }}>
@@ -605,6 +636,12 @@ function Usage() {
           <span className="usage-card__value">{data ? `${Math.round(data.totals.seconds / 60)}m` : '—'}</span>
           <span className="usage-card__label">thinking time</span>
         </div>
+        {data && data.totals.cost > 0 && (
+          <div className="usage-card">
+            <span className="usage-card__value">${data.totals.cost.toFixed(data.totals.cost < 1 ? 4 : 2)}</span>
+            <span className="usage-card__label">reported cost</span>
+          </div>
+        )}
       </div>
 
       <div className="section-label" style={{ marginTop: 24 }}>By bot</div>
@@ -615,7 +652,7 @@ function Usage() {
             <div className="setting-row__text">
               <div>{row.name}</div>
               <div className="setting-row__desc">
-                {row.turns} calls · {Math.round(row.seconds)}s
+                {row.turns} calls · {Math.round(row.seconds)}s{row.cost > 0 ? ` · $${row.cost.toFixed(4)}` : ''}
               </div>
             </div>
             <span className="setting-row__desc">

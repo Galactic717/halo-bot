@@ -15,7 +15,7 @@
     "dev": "node scripts/dev.mjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test host/halo.test.ts host/box.test.ts",
+    "test": "node --test host/halo.test.ts host/box.test.ts host/provider.test.ts",
     "verify": "node scripts/verify.mts",
     "icon": "node scripts/make-icon.mjs",
     "icons:brands": "node scripts/make-brand-icons.mjs",

@@ -92,6 +92,9 @@ export class MemoryStore {
   add(tier: MemoryTier, text: string, now = Date.now()) {
     const clean = text.trim().slice(0, MAX_FACT_CHARS);
     if (!clean) return;
+    // Memory extraction runs after the turn, and the bot can be deleted in between. Writing then would
+    // either throw (the folder is gone) or bring a deleted bot's memory back from the dead.
+    if (!existsSync(join(this.dir, 'log'))) return;
     const existing = this.list();
     if (existing.some((f) => f.text.toLowerCase() === clean.toLowerCase())) return;
     if (tier === 'profile') {
