@@ -29,6 +29,8 @@ jobs:
         run: node scripts/build-native.mjs --strict
       - name: Typecheck
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
       - name: Unit tests
         run: npm test
       - name: End to end, against a scripted model

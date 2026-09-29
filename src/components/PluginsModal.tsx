@@ -430,7 +430,8 @@ function PluginRow({
         disabled={busy}
         onClick={(e) => {
           e.stopPropagation();
-          installed ? onRemove() : onAdd();
+          if (installed) onRemove();
+          else onAdd();
         }}
       >
         {busy ? '…' : installed ? 'Uninstall' : 'Add'}

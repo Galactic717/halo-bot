@@ -173,7 +173,7 @@ export async function runAgUi(options: AgUiOptions): Promise<AgUiRun> {
   let state: unknown = options.state ?? {};
   let runError: string | null = null;
   const calls = new Map<string, { id: string; name: string; args: string }>();
-  let order: string[] = [];
+  const order: string[] = [];
 
   const handle = (event: AgUiEvent) => {
     switch (event.type) {

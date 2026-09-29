@@ -18,6 +18,7 @@
  * harder here.
  */
 import type { Settings } from './types.ts';
+import { omit } from './omit.ts';
 
 export interface N8nSettings {
   enabled: boolean;
@@ -127,7 +128,8 @@ export async function saveWorkflow(
   } catch (error) {
     throw new N8nError(`The workflow is not valid JSON: ${String((error as Error).message).slice(0, 160)}`);
   }
-  const { id: _id, active: _active, tags: _tags, createdAt: _c, updatedAt: _u, versionId: _v, ...rest } = parsed;
+  // n8n rejects its own read-only fields on create, so a pasted export is stripped of them.
+  const rest = omit(parsed, 'id', 'active', 'tags', 'createdAt', 'updatedAt', 'versionId');
   const body = {
     name: input.name?.trim() || (typeof parsed.name === 'string' ? parsed.name : 'Untitled workflow'),
     nodes: rest.nodes ?? [],

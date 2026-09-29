@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Agent, Channel, Message, Routine, Settings, UsageRow } from './types.ts';
 import { forgetBox } from './box.ts';
+import { omit } from './omit.ts';
 
 // ponytail: flat JSON + JSONL transcripts. One user, a few thousand messages.
 // Swap in SQLite only when a single agent's transcript stops fitting in memory.
@@ -276,7 +277,7 @@ export class Store {
 
   private persistAgent(agent: Agent) {
     mkdirSync(this.agentDir(agent.id), { recursive: true });
-    const { status, ...rest } = agent;
+    const rest = omit(agent, 'status');
     // The endpoint's Authorization header is a credential like any other: sealed before it reaches
     // disk, and re-sealed on every write so one written before a keychain existed does not stay clear.
     this.writeJson(join(this.agentDir(agent.id), 'agent.json'), { ...rest, ...this.sealAgent(rest) });

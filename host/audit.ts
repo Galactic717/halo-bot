@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AuditRow, AuditVerdict } from './types.ts';
+import { omit } from './omit.ts';
 
 /**
  * What each bot was allowed to do, what it was refused, and what then failed.
@@ -30,7 +31,7 @@ const GENESIS = '0'.repeat(64);
 
 /** The hash of a row: over its predecessor's hash and every other field, in a fixed key order. */
 export function hashRow(row: AuditRow, prev: string): string {
-  const { hash: _hash, prev: _prev, ...fields } = row;
+  const fields = omit(row, 'hash', 'prev');
   const canonical = JSON.stringify(fields, Object.keys(fields).sort());
   return createHash('sha256').update(prev).update('\n').update(canonical).digest('hex');
 }

@@ -719,7 +719,7 @@ export async function reviewWithModel(
     : settings.provider;
 
   const body = stripComments(action.command ?? action.detail).slice(0, 800);
-  let raw = '';
+  let raw: string;
   try {
     raw = await complete(
       provider,

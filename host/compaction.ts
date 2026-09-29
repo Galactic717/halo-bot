@@ -64,7 +64,7 @@ export async function compactHistory(
     .join('\n')
     .slice(-24_000);
 
-  let summary = '';
+  let summary: string;
   try {
     summary = await complete(
       provider,
