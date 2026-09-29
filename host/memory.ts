@@ -235,7 +235,7 @@ export async function extractMemories(
     },
   ];
 
-  let raw = '';
+  let raw: string;
   try {
     raw = await complete(provider, messages);
   } catch {

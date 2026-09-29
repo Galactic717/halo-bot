@@ -1,6 +1,7 @@
 // The failure-reason vocabulary and retry policy are adapted from Hermes Agent (MIT, (c) 2025 Nous
 // Research). See NOTICE.
 import type { Settings } from './types.ts';
+import { omit } from './omit.ts';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -375,7 +376,7 @@ export function toContentProtocol(messages: ChatMessage[], tools: ToolSchema[]):
       systemDone = true;
     } else if (m.role === 'assistant') {
       const blocks = (m.tool_calls ?? []).map((c) => {
-        let args: unknown = {};
+        let args: unknown;
         try { args = JSON.parse(c.function.arguments || '{}'); } catch { args = c.function.arguments; }
         return '```json\n' + JSON.stringify({ tool: c.function.name, args }) + '\n```';
       });
@@ -383,8 +384,7 @@ export function toContentProtocol(messages: ChatMessage[], tools: ToolSchema[]):
     } else if (m.role === 'tool') {
       push({ role: 'user', content: `Result of ${m.name ?? 'the tool'}:\n${m.content}` });
     } else {
-      const { tool_calls: _calls, tool_call_id: _id, name: _name, ...rest } = m;
-      push(rest);
+      push(omit(m, 'tool_calls', 'tool_call_id', 'name'));
     }
   }
   if (!systemDone) out.unshift({ role: 'system', content: contentProtocolRules(tools) });
@@ -449,7 +449,11 @@ export function parseContentToolCalls(
   const take = (value: unknown): boolean => {
     if (!value || typeof value !== 'object') return false;
     if (Array.isArray(value)) return value.map(take).some(Boolean);
-    const o = value as Record<string, any>;
+    const o = value as {
+      tool_calls?: unknown; tool?: unknown; name?: unknown; tool_name?: unknown;
+      args?: unknown; arguments?: unknown; parameters?: unknown; input?: unknown;
+      function?: { name?: unknown; arguments?: unknown };
+    };
     if (Array.isArray(o.tool_calls)) return take(o.tool_calls);
     const rawName = o.tool ?? o.name ?? o.tool_name ?? o.function?.name;
     const name = typeof rawName === 'string' ? byLower.get(rawName.trim().toLowerCase()) : undefined;
@@ -585,8 +589,9 @@ async function chatOnce(
       if (!trimmed.startsWith('data:')) continue;
       const payload = trimmed.slice(5).trim();
       if (payload === '[DONE]') continue;
-      let json: any;
+      let json: StreamChunk;
       try { json = JSON.parse(payload); } catch { continue; }
+      if (!json || typeof json !== 'object') continue;
       if (typeof json.model === 'string' && json.model) servedBy = json.model;
       if (json.usage) {
         usage = {
@@ -603,7 +608,7 @@ async function chatOnce(
       const choice = json.choices?.[0];
       if (!choice) continue;
       if (choice.finish_reason) finishReason = choice.finish_reason;
-      const delta = choice.delta ?? choice.message ?? {};
+      const delta: StreamDelta = choice.delta ?? choice.message ?? {};
       if (typeof delta.content === 'string' && delta.content.length > 0) {
         text += delta.content;
         onDelta(delta.content);
@@ -656,7 +661,7 @@ export async function complete(settings: Settings['provider'], messages: ChatMes
       signal: guard.signal,
     });
     if (!res.ok) throw new ProviderError(`${res.status} ${res.statusText}`, res.status);
-    const json: any = await res.json();
+    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     return json.choices?.[0]?.message?.content ?? '';
   } catch (error) {
     if (guard.signal.aborted && !signal?.aborted) throw new ProviderError('the model server stopped responding');
@@ -687,7 +692,11 @@ export async function serverInfo(settings: Settings['provider']): Promise<Server
     const root = endpoint(settings, '').replace(/\/v1$/, '');
     const res = await fetch(`${root}/props`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return { kind };
-    const json: any = await res.json();
+    const json = (await res.json()) as {
+      default_generation_settings?: { n_ctx?: number };
+      n_ctx?: number;
+      chat_template_caps?: { supports_tool_calls?: unknown };
+    };
     const n = Number(json.default_generation_settings?.n_ctx ?? json.n_ctx);
     const caps = json.chat_template_caps;
     return {
@@ -698,6 +707,18 @@ export async function serverInfo(settings: Settings['provider']): Promise<Server
   } catch {
     return { kind };
   }
+}
+
+/** The parts of an OpenAI-compatible stream chunk Halo reads. Servers add more, and none of it is trusted. */
+interface StreamDelta {
+  content?: unknown;
+  tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+}
+interface StreamChunk {
+  model?: unknown;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: unknown };
+  error?: { message?: unknown; code?: unknown };
+  choices?: { finish_reason?: string | null; delta?: StreamDelta; message?: StreamDelta }[];
 }
 
 export interface ModelInfo {
@@ -719,8 +740,10 @@ export async function listModelsDetailed(settings: Settings['provider']): Promis
     try {
       const res = await fetch(`${root}/api/tags`);
       if (res.ok) {
-        const json: any = await res.json();
-        const models: ModelInfo[] = (json.models ?? []).map((m: any) => ({
+        const json = (await res.json()) as {
+          models?: { name: string; size?: number; details?: { parameter_size?: string }; capabilities?: string[] }[];
+        };
+        const models: ModelInfo[] = (json.models ?? []).map((m) => ({
           id: m.name,
           size: m.size,
           parameterSize: m.details?.parameter_size,
@@ -753,6 +776,6 @@ export async function listModels(settings: Settings['provider']): Promise<string
   const url = endpoint(settings, '/models');
   const res = await fetch(url, { headers: requestHeaders(settings) });
   if (!res.ok) throw new ProviderError(`${res.status} ${res.statusText}`, res.status);
-  const json: any = await res.json();
-  return (json.data ?? []).map((m: any) => m.id).filter(Boolean);
+  const json = (await res.json()) as { data?: { id?: unknown }[] };
+  return (json.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === 'string' && id.length > 0);
 }

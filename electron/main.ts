@@ -272,7 +272,7 @@ function fireWebhook(token: string): boolean {
     .find((r) => r.enabled !== false && (r.triggers ?? []).some((t) => t.kind === 'webhook' && t.token === token));
   if (!routine) return false;
   const at = Date.now();
-  runner.submitSystemTurn(routine.agentId, routine.prompt, `Routine \"${routine.name}\" (webhook)`, 'routine', (ok, note) =>
+  runner.submitSystemTurn(routine.agentId, routine.prompt, `Routine "${routine.name}" (webhook)`, 'routine', (ok, note) =>
     recordRoutineRun(routine.id, at, ok, note ? `webhook — ${note}` : 'webhook'),
   );
   store.saveRoutine({ ...routine, lastRunAt: at });
@@ -615,7 +615,7 @@ function registerIpc() {
     const path = result.filePaths[0];
     if (result.canceled || !path) return null;
 
-    let payload: ReturnType<typeof parsePortableBot> = null;
+    let payload: ReturnType<typeof parsePortableBot>;
     try {
       payload = parsePortableBot(JSON.parse(readFileSync(path, 'utf8')));
     } catch {

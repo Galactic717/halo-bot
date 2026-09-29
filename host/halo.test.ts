@@ -240,7 +240,7 @@ test('the trail records the decision and never the secret', () => {
   assert.equal(log.read({ query: 'format' }).length, 1);
 
   // and the same holds for structured payloads
-  const redacted = redact({ url: 'https://x', headers: { authorization: 'Bearer abc' }, token: '12345' }) as Record<string, any>;
+  const redacted = redact({ url: 'https://x', headers: { authorization: 'Bearer abc' }, token: '12345' }) as { url: string; headers: Record<string, string>; token: string };
   assert.equal(redacted.url, 'https://x');
   assert.ok(!JSON.stringify(redacted).includes('Bearer abc'));
   assert.ok(!JSON.stringify(redacted).includes('12345'));
