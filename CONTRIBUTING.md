@@ -62,7 +62,7 @@ docs/       reference teardowns, the Android notes, and a record of every pass o
 
 ## Adding a tool
 
-A tool is an entry in `TOOLS` (`host/tools.ts`) and its twin in `core/Tools.kt`. Three things are
+A tool is an entry in one of the area modules under `host/tools/` (put together as `TOOLS` in `host/tools.ts`) and its twin in `core/Tools.kt`. Three things are
 easy to get wrong:
 
 1. **The surface.** `tool.surface` is what sends it through the approval gate. A tool with no surface

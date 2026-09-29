@@ -20,7 +20,7 @@
 ## Layout
 
 - `host/` — runtime, no Electron imports. `runner.ts` is the loop + the one gate. `provider.ts` speaks to
-  models. `tools.ts` is the tool table. `prompt.ts` builds the system prompt. `policy.ts` decides,
+  models. `tools.ts` puts the tool table together from the area modules in `tools/`. `prompt.ts` builds the system prompt. `policy.ts` decides,
   `audit.ts` records (hash-chained), `fence.ts` marks untrusted text, `box.ts` + `native/halo-box`
   confine a bot's shell in its own AppContainer.
 - `electron/` — main process, per-bot browser partition (`computer.ts`), IPC.

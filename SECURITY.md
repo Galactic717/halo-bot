@@ -28,7 +28,7 @@ The boundaries this project claims, which are the ones worth attacking:
 | The hardline floor refuses whatever the settings say | `host/policy.ts` `HARDLINE`, `core/Policy.kt` |
 | A bot's shell cannot write outside its box, or read or write another bot's box (Windows) | `native/halo-box`, `host/box.ts`; tests in `host/box.test.ts` |
 | A bot's shell cannot read the user's files, and has no network unless that bot is given it (Windows) | the same AppContainer; `host/box.test.ts` |
-| A box command that cannot be confined is refused, never run with the user's rights | `host/tools.ts` `runShell`, `host/box.ts` `confinementProblem` |
+| A box command that cannot be confined is refused, never run with the user's rights | `host/tools/core.ts` `runShell`, `host/box.ts` `confinementProblem` |
 | Anything from outside is fenced and cannot forge the marker | `host/fence.ts`, `core/Fence.kt` |
 | Every gated action is recorded before it runs | `host/audit.ts`, `host/runner.ts` `gate` |
 | A row changed, removed or inserted in the trail afterwards is detected | `host/audit.ts` `verify` |
@@ -36,7 +36,7 @@ The boundaries this project claims, which are the ones worth attacking:
 | A bot cannot reach another bot's browser session | `electron/computer.ts` `partitionFor` |
 | Deny beats allow, and a broken rule refuses rather than opens | `host/policy.ts`, `host/expression.ts` |
 | Secrets are sealed before they reach disk and masked before they reach the trail | `host/store.ts`, `host/audit.ts` |
-| A shell sees an allow-list, not this process's environment | `host/tools.ts` `shellEnvironment` |
+| A shell sees an allow-list, not this process's environment | `host/tools/core.ts` `shellEnvironment` |
 
 A bypass of any row above is a vulnerability. `npm run verify` asserts several of them; a report that
 adds a failing check to that harness is the most useful shape a report can take.
